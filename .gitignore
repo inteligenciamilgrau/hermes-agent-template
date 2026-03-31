@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 *.log
 .claude/
+ref_only/

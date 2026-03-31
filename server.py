@@ -1,181 +1,486 @@
 """
-Hermes Agent Railway wrapper.
+Hermes Agent — Railway admin server.
 
-Runs a thin aiohttp HTTP server on $PORT that:
-  - Always responds to /health (Railway health check)
-  - Proxies /v1/* to the internal Hermes API server (OpenAI-compatible)
-  - Manages the Hermes gateway process as a subprocess
+Serves an admin UI on $PORT, manages the Hermes gateway as a subprocess.
+The gateway is started automatically on boot if a provider API key is present.
 """
 
 import asyncio
+import base64
+import json
 import os
-import sys
+import re
+import secrets
+import signal
+import time
+from collections import deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-import aiohttp
-from aiohttp import web
+from starlette.applications import Starlette
+from starlette.authentication import (
+    AuthCredentials,
+    AuthenticationBackend,
+    AuthenticationError,
+    SimpleUser,
+)
+from starlette.middleware import Middleware
+from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
+from starlette.templating import Jinja2Templates
 
-# ── Config ────────────────────────────────────────────────────────────────────
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/data/.hermes"))
-HERMES_INTERNAL_PORT = 8642  # fixed internal port for hermes API server
-PORT = int(os.environ.get("PORT", 8080))
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
-gateway_process: asyncio.subprocess.Process | None = None
+HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
+ENV_FILE = Path(HERMES_HOME) / ".env"
+PAIRING_DIR = Path(HERMES_HOME) / "pairing"
+PAIRING_TTL = 3600
+
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+if not ADMIN_PASSWORD:
+    ADMIN_PASSWORD = secrets.token_urlsafe(16)
+    print(f"[server] Generated admin password: {ADMIN_PASSWORD}", flush=True)
+
+# ── Env var registry ──────────────────────────────────────────────────────────
+# (key, label, category, is_secret)
+ENV_VARS = [
+    ("LLM_MODEL",               "Model",                    "model",     False),
+    ("OPENROUTER_API_KEY",       "OpenRouter",               "provider",  True),
+    ("DEEPSEEK_API_KEY",         "DeepSeek",                 "provider",  True),
+    ("DASHSCOPE_API_KEY",        "DashScope",                "provider",  True),
+    ("GLM_API_KEY",              "GLM / Z.AI",               "provider",  True),
+    ("KIMI_API_KEY",             "Kimi",                     "provider",  True),
+    ("MINIMAX_API_KEY",          "MiniMax",                  "provider",  True),
+    ("HF_TOKEN",                 "Hugging Face",             "provider",  True),
+    ("PARALLEL_API_KEY",         "Parallel (search)",        "tool",      True),
+    ("FIRECRAWL_API_KEY",        "Firecrawl (scrape)",       "tool",      True),
+    ("TAVILY_API_KEY",           "Tavily (search)",          "tool",      True),
+    ("FAL_KEY",                  "FAL (image gen)",          "tool",      True),
+    ("BROWSERBASE_API_KEY",      "Browserbase key",          "tool",      True),
+    ("BROWSERBASE_PROJECT_ID",   "Browserbase project",      "tool",      False),
+    ("GITHUB_TOKEN",             "GitHub token",             "tool",      True),
+    ("VOICE_TOOLS_OPENAI_KEY",   "OpenAI (voice/TTS)",       "tool",      True),
+    ("HONCHO_API_KEY",           "Honcho (memory)",          "tool",      True),
+    ("TELEGRAM_BOT_TOKEN",       "Bot Token",                "telegram",  True),
+    ("TELEGRAM_ALLOWED_USERS",   "Allowed User IDs",         "telegram",  False),
+    ("DISCORD_BOT_TOKEN",        "Bot Token",                "discord",   True),
+    ("DISCORD_ALLOWED_USERS",    "Allowed User IDs",         "discord",   False),
+    ("SLACK_BOT_TOKEN",          "Bot Token (xoxb-...)",     "slack",     True),
+    ("SLACK_APP_TOKEN",          "App Token (xapp-...)",     "slack",     True),
+    ("WHATSAPP_ENABLED",         "Enable WhatsApp",          "whatsapp",  False),
+    ("EMAIL_ADDRESS",            "Email Address",            "email",     False),
+    ("EMAIL_PASSWORD",           "Email Password",           "email",     True),
+    ("EMAIL_IMAP_HOST",          "IMAP Host",                "email",     False),
+    ("EMAIL_SMTP_HOST",          "SMTP Host",                "email",     False),
+    ("MATTERMOST_URL",           "Server URL",               "mattermost",False),
+    ("MATTERMOST_TOKEN",         "Bot Token",                "mattermost",True),
+    ("MATRIX_HOMESERVER",        "Homeserver URL",           "matrix",    False),
+    ("MATRIX_ACCESS_TOKEN",      "Access Token",             "matrix",    True),
+    ("MATRIX_USER_ID",           "User ID",                  "matrix",    False),
+    ("GATEWAY_ALLOW_ALL_USERS",  "Allow all users",          "gateway",   False),
+]
+
+SECRET_KEYS  = {k for k, _, _, s in ENV_VARS if s}
+PROVIDER_KEYS = [k for k, _, c, _ in ENV_VARS if c == "provider"]
+CHANNEL_MAP  = {
+    "Telegram":    "TELEGRAM_BOT_TOKEN",
+    "Discord":     "DISCORD_BOT_TOKEN",
+    "Slack":       "SLACK_BOT_TOKEN",
+    "WhatsApp":    "WHATSAPP_ENABLED",
+    "Email":       "EMAIL_ADDRESS",
+    "Mattermost":  "MATTERMOST_TOKEN",
+    "Matrix":      "MATRIX_ACCESS_TOKEN",
+}
 
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
-def setup_hermes_config() -> None:
-    HERMES_HOME.mkdir(parents=True, exist_ok=True)
+# ── .env helpers ──────────────────────────────────────────────────────────────
+def read_env(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    out = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+            v = v[1:-1]
+        out[k.strip()] = v
+    return out
 
-    # Build .env from Railway env vars
-    pairs = {
-        "LLM_MODEL":               os.environ.get("LLM_MODEL", "openai/gpt-4o-mini"),
-        "OPENROUTER_API_KEY":      os.environ.get("OPENROUTER_API_KEY", ""),
-        "OPENAI_API_KEY":          os.environ.get("OPENAI_API_KEY", ""),
-        "ANTHROPIC_API_KEY":       os.environ.get("ANTHROPIC_API_KEY", ""),
-        "EXA_API_KEY":             os.environ.get("EXA_API_KEY", ""),
-        "FIRECRAWL_API_KEY":       os.environ.get("FIRECRAWL_API_KEY", ""),
-        "PARALLEL_API_KEY":        os.environ.get("PARALLEL_API_KEY", ""),
-        "FAL_KEY":                 os.environ.get("FAL_KEY", ""),
-        "HONCHO_API_KEY":          os.environ.get("HONCHO_API_KEY", ""),
-        "GITHUB_TOKEN":            os.environ.get("GITHUB_TOKEN", ""),
-        "BROWSERBASE_API_KEY":     os.environ.get("BROWSERBASE_API_KEY", ""),
-        "BROWSERBASE_PROJECT_ID":  os.environ.get("BROWSERBASE_PROJECT_ID", ""),
-        "TERMINAL_ENV":            os.environ.get("TERMINAL_ENV", "local"),
-        "TERMINAL_TIMEOUT":        os.environ.get("TERMINAL_TIMEOUT", "60"),
-        "GATEWAY_ALLOW_ALL_USERS": os.environ.get("GATEWAY_ALLOW_ALL_USERS", "true"),
-        # Internal API server binds to a fixed port; our wrapper proxies it
-        "API_SERVER_HOST":         "127.0.0.1",
-        "API_SERVER_PORT":         str(HERMES_INTERNAL_PORT),
+
+def write_env(path: Path, data: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cat_order = ["model", "provider", "tool",
+                 "telegram", "discord", "slack", "whatsapp",
+                 "email", "mattermost", "matrix", "gateway"]
+    cat_labels = {
+        "model": "Model", "provider": "Providers", "tool": "Tools",
+        "telegram": "Telegram", "discord": "Discord", "slack": "Slack",
+        "whatsapp": "WhatsApp", "email": "Email",
+        "mattermost": "Mattermost", "matrix": "Matrix", "gateway": "Gateway",
+    }
+    key_cat = {k: c for k, _, c, _ in ENV_VARS}
+    grouped: dict[str, list[str]] = {c: [] for c in cat_order}
+    grouped["other"] = []
+
+    for k, v in data.items():
+        if not v:
+            continue
+        cat = key_cat.get(k, "other")
+        grouped.setdefault(cat, []).append(f"{k}={v}")
+
+    lines: list[str] = []
+    for cat in cat_order:
+        entries = sorted(grouped.get(cat, []))
+        if entries:
+            lines.append(f"# {cat_labels.get(cat, cat)}")
+            lines.extend(entries)
+            lines.append("")
+    if grouped["other"]:
+        lines.append("# Other")
+        lines.extend(sorted(grouped["other"]))
+        lines.append("")
+
+    path.write_text("\n".join(lines))
+
+
+def mask(data: dict[str, str]) -> dict[str, str]:
+    return {
+        k: (v[:8] + "***" if len(v) > 8 else "***") if k in SECRET_KEYS and v else v
+        for k, v in data.items()
     }
 
-    with open(HERMES_HOME / ".env", "w") as f:
-        for k, v in pairs.items():
-            if v:
-                f.write(f"{k}={v}\n")
 
-    model = pairs["LLM_MODEL"]
-    terminal = pairs["TERMINAL_ENV"]
-    config_yaml = f"""\
-model:
-  default: "{model}"
-  provider: "auto"
-
-terminal:
-  backend: "{terminal}"
-  timeout: 60
-  cwd: "/tmp"
-
-agent:
-  max_iterations: 50
-  reasoning_effort: "medium"
-
-platforms:
-  api_server:
-    enabled: true
-    host: "127.0.0.1"
-    port: {HERMES_INTERNAL_PORT}
-    cors_origins:
-      - "*"
-
-data_dir: "{HERMES_HOME}"
-"""
-    with open(HERMES_HOME / "config.yaml", "w") as f:
-        f.write(config_yaml)
-
-    print(f"[server] Config written to {HERMES_HOME}", flush=True)
+def unmask(new: dict[str, str], existing: dict[str, str]) -> dict[str, str]:
+    return {
+        k: (existing.get(k, "") if k in SECRET_KEYS and v.endswith("***") else v)
+        for k, v in new.items()
+    }
 
 
-# ── Gateway subprocess ────────────────────────────────────────────────────────
-async def start_gateway() -> None:
-    global gateway_process
-    print("[server] Starting Hermes gateway...", flush=True)
-    gateway_process = await asyncio.create_subprocess_exec(
-        sys.executable, "/opt/hermes/cli.py", "--gateway",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd="/opt/hermes",
-    )
-    asyncio.create_task(_stream_logs(gateway_process))
-    print(f"[server] Gateway started (pid={gateway_process.pid})", flush=True)
-
-
-async def _stream_logs(proc: asyncio.subprocess.Process) -> None:
-    assert proc.stdout
-    async for line in proc.stdout:
-        print(f"[hermes] {line.decode().rstrip()}", flush=True)
-    rc = await proc.wait()
-    print(f"[server] Gateway exited with code {rc}", flush=True)
-
-
-# ── HTTP handlers ─────────────────────────────────────────────────────────────
-async def handle_health(request: web.Request) -> web.Response:
-    running = gateway_process is not None and gateway_process.returncode is None
-    return web.json_response({
-        "status": "ok",
-        "gateway": "running" if running else "starting",
-    })
-
-
-async def handle_proxy(request: web.Request) -> web.Response:
-    path = request.match_info.get("path", "")
-    target_url = f"http://127.0.0.1:{HERMES_INTERNAL_PORT}/{path}"
-    if request.query_string:
-        target_url += f"?{request.query_string}"
-
-    # Strip headers that would confuse the upstream
-    skip = {"host", "content-length", "transfer-encoding", "connection"}
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in skip}
-
-    async with aiohttp.ClientSession() as session:
+# ── Auth ──────────────────────────────────────────────────────────────────────
+class BasicAuth(AuthenticationBackend):
+    async def authenticate(self, conn):
+        if "Authorization" not in conn.headers:
+            return None
         try:
-            upstream = await session.request(
-                method=request.method,
-                url=target_url,
-                headers=headers,
-                data=await request.read(),
-                allow_redirects=False,
+            scheme, creds = conn.headers["Authorization"].split()
+            if scheme.lower() != "basic":
+                return None
+            user, _, pw = base64.b64decode(creds).decode().partition(":")
+        except Exception:
+            raise AuthenticationError("Invalid credentials")
+        if user == ADMIN_USERNAME and pw == ADMIN_PASSWORD:
+            return AuthCredentials(["authenticated"]), SimpleUser(user)
+        raise AuthenticationError("Invalid credentials")
+
+
+def guard(request: Request):
+    if not request.user.is_authenticated:
+        return PlainTextResponse(
+            "Unauthorized", status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="hermes-admin"'},
+        )
+
+
+# ── Gateway manager ───────────────────────────────────────────────────────────
+class Gateway:
+    def __init__(self):
+        self.proc: asyncio.subprocess.Process | None = None
+        self.state = "stopped"
+        self.logs: deque[str] = deque(maxlen=500)
+        self.started_at: float | None = None
+        self.restarts = 0
+
+    async def start(self):
+        if self.proc and self.proc.returncode is None:
+            return
+        self.state = "starting"
+        try:
+            env = {**os.environ, "HERMES_HOME": HERMES_HOME}
+            env.update(read_env(ENV_FILE))
+            self.proc = await asyncio.create_subprocess_exec(
+                "hermes", "gateway",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
             )
-            body = await upstream.read()
-            resp_headers = {
-                k: v for k, v in upstream.headers.items()
-                if k.lower() not in {"transfer-encoding", "content-encoding", "connection"}
-            }
-            return web.Response(status=upstream.status, headers=resp_headers, body=body)
-        except aiohttp.ClientConnectorError:
-            return web.json_response(
-                {"error": "Hermes gateway not ready yet — please retry in a moment"},
-                status=503,
-            )
+            self.state = "running"
+            self.started_at = time.time()
+            asyncio.create_task(self._drain())
+        except Exception as e:
+            self.state = "error"
+            self.logs.append(f"[error] Failed to start: {e}")
+
+    async def stop(self):
+        if not self.proc or self.proc.returncode is not None:
+            self.state = "stopped"
+            return
+        self.state = "stopping"
+        self.proc.terminate()
+        try:
+            await asyncio.wait_for(self.proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            self.proc.kill()
+            await self.proc.wait()
+        self.state = "stopped"
+        self.started_at = None
+
+    async def restart(self):
+        await self.stop()
+        self.restarts += 1
+        await self.start()
+
+    async def _drain(self):
+        assert self.proc and self.proc.stdout
+        async for raw in self.proc.stdout:
+            line = ANSI_ESCAPE.sub("", raw.decode(errors="replace").rstrip())
+            self.logs.append(line)
+        if self.state == "running":
+            self.state = "error"
+            self.logs.append(f"[error] Gateway exited (code {self.proc.returncode})")
+
+    def status(self) -> dict:
+        uptime = int(time.time() - self.started_at) if self.started_at and self.state == "running" else None
+        return {
+            "state":    self.state,
+            "pid":      self.proc.pid if self.proc and self.proc.returncode is None else None,
+            "uptime":   uptime,
+            "restarts": self.restarts,
+        }
+
+
+gw = Gateway()
+cfg_lock = asyncio.Lock()
+
+
+# ── Route handlers ────────────────────────────────────────────────────────────
+async def page_index(request: Request):
+    if err := guard(request): return err
+    return templates.TemplateResponse(request, "index.html")
+
+
+async def route_health(request: Request):
+    return JSONResponse({"status": "ok", "gateway": gw.state})
+
+
+async def api_config_get(request: Request):
+    if err := guard(request): return err
+    async with cfg_lock:
+        data = read_env(ENV_FILE)
+    defs = [{"key": k, "label": l, "category": c, "secret": s} for k, l, c, s in ENV_VARS]
+    return JSONResponse({"vars": mask(data), "defs": defs})
+
+
+async def api_config_put(request: Request):
+    if err := guard(request): return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    try:
+        restart = body.pop("_restart", False)
+        new_vars = body.get("vars", {})
+        async with cfg_lock:
+            existing = read_env(ENV_FILE)
+            merged = unmask(new_vars, existing)
+            for k, v in existing.items():
+                if k not in merged:
+                    merged[k] = v
+            write_env(ENV_FILE, merged)
+        if restart:
+            asyncio.create_task(gw.restart())
+        return JSONResponse({"ok": True, "restarting": restart})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_status(request: Request):
+    if err := guard(request): return err
+    data = read_env(ENV_FILE)
+    providers = {
+        k.replace("_API_KEY","").replace("_TOKEN","").replace("HF_","HuggingFace ").replace("_"," ").title():
+        {"configured": bool(data.get(k))}
+        for k in PROVIDER_KEYS
+    }
+    channels = {
+        name: {"configured": bool(v := data.get(key,"")) and v.lower() not in ("false","0","no")}
+        for name, key in CHANNEL_MAP.items()
+    }
+    return JSONResponse({"gateway": gw.status(), "providers": providers, "channels": channels})
+
+
+async def api_logs(request: Request):
+    if err := guard(request): return err
+    return JSONResponse({"lines": list(gw.logs)})
+
+
+async def api_gw_start(request: Request):
+    if err := guard(request): return err
+    asyncio.create_task(gw.start())
+    return JSONResponse({"ok": True})
+
+
+async def api_gw_stop(request: Request):
+    if err := guard(request): return err
+    asyncio.create_task(gw.stop())
+    return JSONResponse({"ok": True})
+
+
+async def api_gw_restart(request: Request):
+    if err := guard(request): return err
+    asyncio.create_task(gw.restart())
+    return JSONResponse({"ok": True})
+
+
+# ── Pairing ───────────────────────────────────────────────────────────────────
+def _pjson(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text()) if path.exists() else {}
+    except Exception:
+        return {}
+
+
+def _wjson(path: Path, data: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    try: os.chmod(path, 0o600)
+    except OSError: pass
+
+
+def _platforms(suffix: str) -> list[str]:
+    if not PAIRING_DIR.exists(): return []
+    return [f.stem.rsplit(f"-{suffix}", 1)[0] for f in PAIRING_DIR.glob(f"*-{suffix}.json")]
+
+
+async def api_pairing_pending(request: Request):
+    if err := guard(request): return err
+    now = time.time()
+    out = []
+    for p in _platforms("pending"):
+        for code, info in _pjson(PAIRING_DIR / f"{p}-pending.json").items():
+            if now - info.get("created_at", now) <= PAIRING_TTL:
+                out.append({"platform": p, "code": code,
+                            "user_id": info.get("user_id",""), "user_name": info.get("user_name",""),
+                            "age_minutes": int((now - info.get("created_at", now)) / 60)})
+    return JSONResponse({"pending": out})
+
+
+async def api_pairing_approve(request: Request):
+    if err := guard(request): return err
+    try: body = await request.json()
+    except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    platform, code = body.get("platform",""), body.get("code","").upper().strip()
+    if not platform or not code:
+        return JSONResponse({"error": "platform and code required"}, status_code=400)
+    pending_path = PAIRING_DIR / f"{platform}-pending.json"
+    pending = _pjson(pending_path)
+    if code not in pending:
+        return JSONResponse({"error": "Code not found"}, status_code=404)
+    entry = pending.pop(code)
+    _wjson(pending_path, pending)
+    approved = _pjson(PAIRING_DIR / f"{platform}-approved.json")
+    approved[entry["user_id"]] = {"user_name": entry.get("user_name",""), "approved_at": time.time()}
+    _wjson(PAIRING_DIR / f"{platform}-approved.json", approved)
+    return JSONResponse({"ok": True})
+
+
+async def api_pairing_deny(request: Request):
+    if err := guard(request): return err
+    try: body = await request.json()
+    except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    platform, code = body.get("platform",""), body.get("code","").upper().strip()
+    p = PAIRING_DIR / f"{platform}-pending.json"
+    pending = _pjson(p)
+    if code in pending:
+        del pending[code]
+        _wjson(p, pending)
+    return JSONResponse({"ok": True})
+
+
+async def api_pairing_approved(request: Request):
+    if err := guard(request): return err
+    out = []
+    for p in _platforms("approved"):
+        for uid, info in _pjson(PAIRING_DIR / f"{p}-approved.json").items():
+            out.append({"platform": p, "user_id": uid,
+                        "user_name": info.get("user_name",""), "approved_at": info.get("approved_at",0)})
+    return JSONResponse({"approved": out})
+
+
+async def api_pairing_revoke(request: Request):
+    if err := guard(request): return err
+    try: body = await request.json()
+    except Exception: return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    platform, uid = body.get("platform",""), body.get("user_id","")
+    if not platform or not uid:
+        return JSONResponse({"error": "platform and user_id required"}, status_code=400)
+    p = PAIRING_DIR / f"{platform}-approved.json"
+    approved = _pjson(p)
+    if uid in approved:
+        del approved[uid]
+        _wjson(p, approved)
+    return JSONResponse({"ok": True})
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
-async def on_startup(app: web.Application) -> None:
-    setup_hermes_config()
-    await start_gateway()
+async def auto_start():
+    data = read_env(ENV_FILE)
+    if any(data.get(k) for k in PROVIDER_KEYS):
+        asyncio.create_task(gw.start())
+    else:
+        print("[server] No provider key found — gateway not started. Configure one in the admin UI.", flush=True)
 
 
-async def on_cleanup(app: web.Application) -> None:
-    if gateway_process and gateway_process.returncode is None:
-        print("[server] Shutting down gateway...", flush=True)
-        gateway_process.terminate()
-        try:
-            await asyncio.wait_for(gateway_process.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            gateway_process.kill()
+@asynccontextmanager
+async def lifespan(app):
+    await auto_start()
+    yield
+    await gw.stop()
 
 
-def main() -> None:
-    app = web.Application()
-    app.on_startup.append(on_startup)
-    app.on_cleanup.append(on_cleanup)
+routes = [
+    Route("/",                          page_index),
+    Route("/health",                    route_health),
+    Route("/api/config",                api_config_get,      methods=["GET"]),
+    Route("/api/config",                api_config_put,      methods=["PUT"]),
+    Route("/api/status",                api_status),
+    Route("/api/logs",                  api_logs),
+    Route("/api/gateway/start",         api_gw_start,        methods=["POST"]),
+    Route("/api/gateway/stop",          api_gw_stop,         methods=["POST"]),
+    Route("/api/gateway/restart",       api_gw_restart,      methods=["POST"]),
+    Route("/api/pairing/pending",       api_pairing_pending),
+    Route("/api/pairing/approve",       api_pairing_approve, methods=["POST"]),
+    Route("/api/pairing/deny",          api_pairing_deny,    methods=["POST"]),
+    Route("/api/pairing/approved",      api_pairing_approved),
+    Route("/api/pairing/revoke",        api_pairing_revoke,  methods=["POST"]),
+]
 
-    app.router.add_get("/health", handle_health)
-    app.router.add_route("*", "/{path:.*}", handle_proxy)
-
-    print(f"[server] Listening on 0.0.0.0:{PORT}", flush=True)
-    web.run_app(app, host="0.0.0.0", port=PORT, access_log=None)
-
+app = Starlette(
+    routes=routes,
+    middleware=[Middleware(AuthenticationMiddleware, backend=BasicAuth())],
+    lifespan=lifespan,
+)
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    port = int(os.environ.get("PORT", "8080"))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info", loop="asyncio")
+    server = uvicorn.Server(config)
+
+    def _shutdown():
+        loop.create_task(gw.stop())
+        server.should_exit = True
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _shutdown)
+
+    loop.run_until_complete(server.serve())

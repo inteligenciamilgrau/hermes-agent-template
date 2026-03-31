@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hermes Agent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: '#0f1117',
+            panel:   '#161b27',
+            border:  '#1e2535',
+            muted:   '#8892a4',
+          }
+        }
+      }
+    };
+  </script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    [x-cloak] { display: none !important; }
+    body { background: #0f1117; color: #e2e8f0; }
+    .mono { font-family: 'Menlo', 'Monaco', 'Courier New', monospace; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #1e2535; border-radius: 4px; }
+    input[type=text], input[type=password] {
+      background: #0a0d14;
+      border: 1px solid #1e2535;
+      color: #e2e8f0;
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 13px;
+      width: 100%;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type=text]:focus, input[type=password]:focus { border-color: #6366f1; }
+    input[type=checkbox] { accent-color: #6366f1; width: 14px; height: 14px; }
+    label.field-label { display: block; font-size: 11px; color: #8892a4; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  </style>
+</head>
+<body class="h-full" x-data="app()" x-init="init()" x-cloak>
+
+<div class="flex h-screen overflow-hidden">
+
+  <!-- Sidebar -->
+  <aside class="w-52 flex-shrink-0 flex flex-col border-r border-border" style="background:#0d1120">
+    <div class="px-5 py-5 border-b border-border">
+      <div class="flex items-center gap-2 mb-1">
+        <span class="text-indigo-400 text-lg">⬡</span>
+        <span class="font-semibold text-sm tracking-wide">Hermes Agent</span>
+      </div>
+      <div class="flex items-center gap-1.5 mt-2">
+        <span class="w-1.5 h-1.5 rounded-full"
+              :class="{
+                'bg-emerald-400': gw.state==='running',
+                'bg-red-400':     gw.state==='error',
+                'bg-yellow-400':  gw.state==='starting'||gw.state==='stopping',
+                'bg-gray-500':    gw.state==='stopped'
+              }"></span>
+        <span class="text-xs text-muted" x-text="gw.state||'unknown'"></span>
+      </div>
+    </div>
+
+    <nav class="flex-1 px-3 py-4 space-y-0.5">
+      <template x-for="item in nav" :key="item.id">
+        <button @click="page = item.id"
+                class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors relative"
+                :class="page===item.id ? 'bg-indigo-600/20 text-indigo-300' : 'text-muted hover:text-slate-200 hover:bg-white/5'">
+          <span x-text="item.icon" class="text-base leading-none"></span>
+          <span x-text="item.label"></span>
+          <span x-show="item.id==='users' && pendingCount>0"
+                class="ml-auto bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center"
+                x-text="pendingCount"></span>
+        </button>
+      </template>
+    </nav>
+
+    <div class="px-4 pb-4">
+      <button @click="restartGateway()"
+              class="w-full text-xs px-3 py-2 rounded-lg border border-border text-muted hover:text-slate-200 hover:border-indigo-500/50 transition-colors">
+        ↺ Restart Gateway
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="flex-1 overflow-y-auto">
+
+    <!-- Config page -->
+    <div x-show="page==='config'" class="p-6 max-w-3xl">
+      <h2 class="text-base font-semibold mb-5">Configuration</h2>
+
+      <!-- Model -->
+      <section class="mb-6">
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Model</h3>
+        <div class="bg-panel border border-border rounded-xl p-4">
+          <label class="field-label">LLM Model</label>
+          <input type="text" :value="vars.LLM_MODEL||''" @input="vars.LLM_MODEL=$event.target.value"
+                 placeholder="openai/gpt-4o-mini  or  anthropic/claude-opus-4.6">
+          <p class="text-xs text-muted mt-1.5">Use OpenRouter format: <span class="mono text-indigo-300">provider/model</span></p>
+        </div>
+      </section>
+
+      <!-- Providers -->
+      <section class="mb-6">
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">LLM Providers</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <template x-for="p in providers" :key="p.key">
+            <div class="bg-panel border border-border rounded-xl p-4">
+              <label class="field-label" x-text="p.label + ' API Key'"></label>
+              <input type="password" :value="vars[p.key]||''" @input="vars[p.key]=$event.target.value" placeholder="sk-...">
+            </div>
+          </template>
+        </div>
+      </section>
+
+      <!-- Messaging -->
+      <section class="mb-6">
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Messaging Channels</h3>
+        <div class="space-y-3">
+
+          <div class="bg-panel border border-border rounded-xl p-4">
+            <p class="text-sm font-medium mb-3">Telegram</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div><label class="field-label">Bot Token</label>
+                <input type="password" :value="vars.TELEGRAM_BOT_TOKEN||''" @input="vars.TELEGRAM_BOT_TOKEN=$event.target.value" placeholder="From @BotFather"></div>
+              <div><label class="field-label">Allowed User IDs</label>
+                <input type="text" :value="vars.TELEGRAM_ALLOWED_USERS||''" @input="vars.TELEGRAM_ALLOWED_USERS=$event.target.value" placeholder="123,456"></div>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4">
+            <p class="text-sm font-medium mb-3">Discord</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div><label class="field-label">Bot Token</label>
+                <input type="password" :value="vars.DISCORD_BOT_TOKEN||''" @input="vars.DISCORD_BOT_TOKEN=$event.target.value"></div>
+              <div><label class="field-label">Allowed User IDs</label>
+                <input type="text" :value="vars.DISCORD_ALLOWED_USERS||''" @input="vars.DISCORD_ALLOWED_USERS=$event.target.value"></div>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4">
+            <p class="text-sm font-medium mb-3">Slack</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div><label class="field-label">Bot Token (xoxb-...)</label>
+                <input type="password" :value="vars.SLACK_BOT_TOKEN||''" @input="vars.SLACK_BOT_TOKEN=$event.target.value"></div>
+              <div><label class="field-label">App Token (xapp-...)</label>
+                <input type="password" :value="vars.SLACK_APP_TOKEN||''" @input="vars.SLACK_APP_TOKEN=$event.target.value"></div>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4">
+            <p class="text-sm font-medium mb-3">Email</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div><label class="field-label">Address</label>
+                <input type="text" :value="vars.EMAIL_ADDRESS||''" @input="vars.EMAIL_ADDRESS=$event.target.value" placeholder="hermes@gmail.com"></div>
+              <div><label class="field-label">Password</label>
+                <input type="password" :value="vars.EMAIL_PASSWORD||''" @input="vars.EMAIL_PASSWORD=$event.target.value"></div>
+              <div><label class="field-label">IMAP Host</label>
+                <input type="text" :value="vars.EMAIL_IMAP_HOST||''" @input="vars.EMAIL_IMAP_HOST=$event.target.value" placeholder="imap.gmail.com"></div>
+              <div><label class="field-label">SMTP Host</label>
+                <input type="text" :value="vars.EMAIL_SMTP_HOST||''" @input="vars.EMAIL_SMTP_HOST=$event.target.value" placeholder="smtp.gmail.com"></div>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4">
+            <p class="text-sm font-medium mb-3">Mattermost</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div><label class="field-label">Server URL</label>
+                <input type="text" :value="vars.MATTERMOST_URL||''" @input="vars.MATTERMOST_URL=$event.target.value" placeholder="https://mm.example.com"></div>
+              <div><label class="field-label">Bot Token</label>
+                <input type="password" :value="vars.MATTERMOST_TOKEN||''" @input="vars.MATTERMOST_TOKEN=$event.target.value"></div>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4">
+            <p class="text-sm font-medium mb-3">Matrix</p>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div><label class="field-label">Homeserver URL</label>
+                <input type="text" :value="vars.MATRIX_HOMESERVER||''" @input="vars.MATRIX_HOMESERVER=$event.target.value" placeholder="https://matrix.example.org"></div>
+              <div><label class="field-label">Access Token</label>
+                <input type="password" :value="vars.MATRIX_ACCESS_TOKEN||''" @input="vars.MATRIX_ACCESS_TOKEN=$event.target.value"></div>
+              <div><label class="field-label">User ID</label>
+                <input type="text" :value="vars.MATRIX_USER_ID||''" @input="vars.MATRIX_USER_ID=$event.target.value" placeholder="@hermes:example.org"></div>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
+            <input type="checkbox" :checked="vars.WHATSAPP_ENABLED==='true'"
+                   @change="vars.WHATSAPP_ENABLED=$event.target.checked?'true':'false'">
+            <div>
+              <p class="text-sm font-medium">WhatsApp</p>
+              <p class="text-xs text-muted">Requires pairing via gateway logs on first run</p>
+            </div>
+          </div>
+
+          <div class="bg-panel border border-border rounded-xl p-4 flex items-center gap-3">
+            <input type="checkbox" :checked="vars.GATEWAY_ALLOW_ALL_USERS==='true'"
+                   @change="vars.GATEWAY_ALLOW_ALL_USERS=$event.target.checked?'true':'false'">
+            <div>
+              <p class="text-sm font-medium">Allow all users</p>
+              <p class="text-xs text-muted">Skip per-platform allowlists — use with caution</p>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Tools -->
+      <section class="mb-6">
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Tool API Keys</h3>
+        <div class="bg-panel border border-border rounded-xl p-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <template x-for="t in tools" :key="t.key">
+              <div>
+                <label class="field-label" x-text="t.label"></label>
+                <input :type="t.secret?'password':'text'" :value="vars[t.key]||''" @input="vars[t.key]=$event.target.value">
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <!-- Save bar -->
+      <div class="sticky bottom-0 py-4 flex items-center justify-between bg-surface/90 backdrop-blur-sm border-t border-border -mx-6 px-6">
+        <label class="flex items-center gap-2 text-sm text-muted cursor-pointer">
+          <input type="checkbox" x-model="restartOnSave">
+          Restart gateway after save
+        </label>
+        <button @click="saveConfig()" :disabled="saving"
+                class="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors">
+          <span x-show="!saving">Save</span>
+          <span x-show="saving">Saving…</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Users page -->
+    <div x-show="page==='users'" class="p-6 max-w-3xl">
+      <h2 class="text-base font-semibold mb-5">Users</h2>
+
+      <section class="mb-6">
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Pending Pairing Requests</h3>
+        <div class="bg-panel border border-border rounded-xl overflow-hidden">
+          <div x-show="pending.length===0" class="px-4 py-8 text-center text-muted text-sm">
+            No pending requests. Unauthorized users who message your bot will appear here.
+          </div>
+          <table x-show="pending.length>0" class="w-full text-sm">
+            <thead class="border-b border-border">
+              <tr>
+                <th class="text-left px-4 py-2.5 text-xs text-muted font-medium">Platform</th>
+                <th class="text-left px-4 py-2.5 text-xs text-muted font-medium">User</th>
+                <th class="text-left px-4 py-2.5 text-xs text-muted font-medium">Age</th>
+                <th class="text-right px-4 py-2.5 text-xs text-muted font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="r in pending" :key="r.platform+r.code">
+                <tr class="border-t border-border">
+                  <td class="px-4 py-2.5 capitalize text-indigo-300" x-text="r.platform"></td>
+                  <td class="px-4 py-2.5">
+                    <span x-text="r.user_name||r.user_id"></span>
+                    <span class="ml-1 text-xs text-muted mono" x-show="r.user_name" x-text="'#'+r.user_id"></span>
+                  </td>
+                  <td class="px-4 py-2.5 text-muted text-xs" x-text="r.age_minutes+'m ago'"></td>
+                  <td class="px-4 py-2.5 text-right">
+                    <div class="flex gap-2 justify-end">
+                      <button @click="approve(r.platform,r.code)"
+                              class="text-xs px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 rounded-lg transition-colors">Approve</button>
+                      <button @click="deny(r.platform,r.code)"
+                              class="text-xs px-3 py-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-lg transition-colors">Deny</button>
+                    </div>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Approved Users</h3>
+        <div class="bg-panel border border-border rounded-xl overflow-hidden">
+          <div x-show="approved.length===0" class="px-4 py-8 text-center text-muted text-sm">No approved users yet.</div>
+          <table x-show="approved.length>0" class="w-full text-sm">
+            <thead class="border-b border-border">
+              <tr>
+                <th class="text-left px-4 py-2.5 text-xs text-muted font-medium">Platform</th>
+                <th class="text-left px-4 py-2.5 text-xs text-muted font-medium">User</th>
+                <th class="text-left px-4 py-2.5 text-xs text-muted font-medium">Approved</th>
+                <th class="text-right px-4 py-2.5 text-xs text-muted font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="u in approved" :key="u.platform+u.user_id">
+                <tr class="border-t border-border">
+                  <td class="px-4 py-2.5 capitalize text-indigo-300" x-text="u.platform"></td>
+                  <td class="px-4 py-2.5">
+                    <span x-text="u.user_name||u.user_id"></span>
+                    <span class="ml-1 text-xs text-muted mono" x-show="u.user_name" x-text="'#'+u.user_id"></span>
+                  </td>
+                  <td class="px-4 py-2.5 text-muted text-xs" x-text="fmtDate(u.approved_at)"></td>
+                  <td class="px-4 py-2.5 text-right">
+                    <button @click="revoke(u.platform,u.user_id)"
+                            class="text-xs px-3 py-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 rounded-lg transition-colors">Revoke</button>
+                  </td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- Status page -->
+    <div x-show="page==='status'" class="p-6 max-w-3xl">
+      <h2 class="text-base font-semibold mb-5">Status</h2>
+
+      <!-- Gateway -->
+      <section class="mb-6">
+        <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Gateway</h3>
+        <div class="bg-panel border border-border rounded-xl p-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-6">
+              <div>
+                <p class="text-xs text-muted mb-0.5">State</p>
+                <p class="font-medium text-sm"
+                   :class="{
+                     'text-emerald-400': gw.state==='running',
+                     'text-red-400':     gw.state==='error',
+                     'text-yellow-400':  gw.state==='starting'||gw.state==='stopping',
+                     'text-muted':       gw.state==='stopped'
+                   }" x-text="gw.state||'unknown'"></p>
+              </div>
+              <div x-show="gw.pid">
+                <p class="text-xs text-muted mb-0.5">PID</p>
+                <p class="font-medium text-sm mono" x-text="gw.pid"></p>
+              </div>
+              <div x-show="gw.uptime!=null">
+                <p class="text-xs text-muted mb-0.5">Uptime</p>
+                <p class="font-medium text-sm" x-text="fmtUptime(gw.uptime)"></p>
+              </div>
+              <div>
+                <p class="text-xs text-muted mb-0.5">Restarts</p>
+                <p class="font-medium text-sm" x-text="gw.restarts??0"></p>
+              </div>
+            </div>
+            <div class="flex gap-2">
+              <button @click="startGw()"  :disabled="gw.state==='running'"
+                      class="text-xs px-3 py-1.5 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-40 rounded-lg transition-colors">Start</button>
+              <button @click="stopGw()"   :disabled="gw.state==='stopped'"
+                      class="text-xs px-3 py-1.5 bg-red-500/10 text-red-400 hover:bg-red-500/20 disabled:opacity-40 rounded-lg transition-colors">Stop</button>
+              <button @click="restartGateway()"
+                      class="text-xs px-3 py-1.5 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 rounded-lg transition-colors">Restart</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Providers & Channels -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <section>
+          <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Providers</h3>
+          <div class="bg-panel border border-border rounded-xl overflow-hidden">
+            <template x-for="(info,name) in status.providers||{}" :key="name">
+              <div class="flex items-center justify-between px-4 py-2.5 border-b border-border last:border-0">
+                <span class="text-sm" x-text="name"></span>
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="info.configured?'bg-emerald-500/10 text-emerald-400':'bg-white/5 text-muted'"
+                      x-text="info.configured?'✓ set':'—'"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+        <section>
+          <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider mb-3">Channels</h3>
+          <div class="bg-panel border border-border rounded-xl overflow-hidden">
+            <template x-for="(info,name) in status.channels||{}" :key="name">
+              <div class="flex items-center justify-between px-4 py-2.5 border-b border-border last:border-0">
+                <span class="text-sm" x-text="name"></span>
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="info.configured?'bg-emerald-500/10 text-emerald-400':'bg-white/5 text-muted'"
+                      x-text="info.configured?'✓ set':'—'"></span>
+              </div>
+            </template>
+          </div>
+        </section>
+      </div>
+
+      <!-- Logs -->
+      <section>
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-xs font-semibold text-indigo-400 uppercase tracking-wider">Gateway Logs</h3>
+          <span class="text-xs text-muted" x-text="logs.length+' lines'"></span>
+        </div>
+        <div class="bg-panel border border-border rounded-xl p-4 mono text-xs text-slate-400
+                    h-80 overflow-y-auto leading-5" x-ref="logbox">
+          <template x-for="(l,i) in logs" :key="i">
+            <div class="whitespace-pre-wrap break-all" x-text="l"></div>
+          </template>
+          <div x-show="logs.length===0" class="text-muted">No logs yet.</div>
+        </div>
+      </section>
+    </div>
+
+  </main>
+</div>
+
+<!-- Toast -->
+<div x-show="toast.show" x-transition.opacity
+     class="fixed bottom-5 right-5 px-4 py-2.5 rounded-lg text-sm font-medium text-white shadow-xl z-50"
+     :class="toast.ok?'bg-emerald-600':'bg-red-600'">
+  <span x-text="toast.msg"></span>
+</div>
+
+<script>
+function app() {
+  return {
+    page: 'config',
+    nav: [
+      { id: 'config', label: 'Configuration', icon: '⚙' },
+      { id: 'users',  label: 'Users',          icon: '👥' },
+      { id: 'status', label: 'Status',          icon: '◎' },
+    ],
+    vars: {},
+    gw: {},
+    status: {},
+    logs: [],
+    pending: [],
+    approved: [],
+    saving: false,
+    restartOnSave: true,
+    toast: { show: false, msg: '', ok: true },
+
+    providers: [
+      { key: 'OPENROUTER_API_KEY', label: 'OpenRouter' },
+      { key: 'DEEPSEEK_API_KEY',   label: 'DeepSeek'   },
+      { key: 'DASHSCOPE_API_KEY',  label: 'DashScope'  },
+      { key: 'GLM_API_KEY',        label: 'GLM / Z.AI' },
+      { key: 'KIMI_API_KEY',       label: 'Kimi'       },
+      { key: 'MINIMAX_API_KEY',    label: 'MiniMax'    },
+      { key: 'HF_TOKEN',           label: 'HuggingFace'},
+    ],
+    tools: [
+      { key: 'PARALLEL_API_KEY',       label: 'Parallel (search)',          secret: true  },
+      { key: 'FIRECRAWL_API_KEY',      label: 'Firecrawl (scraping)',        secret: true  },
+      { key: 'TAVILY_API_KEY',         label: 'Tavily (search)',             secret: true  },
+      { key: 'FAL_KEY',                label: 'FAL (image gen)',             secret: true  },
+      { key: 'BROWSERBASE_API_KEY',    label: 'Browserbase API key',         secret: true  },
+      { key: 'BROWSERBASE_PROJECT_ID', label: 'Browserbase project ID',      secret: false },
+      { key: 'GITHUB_TOKEN',           label: 'GitHub token',                secret: true  },
+      { key: 'VOICE_TOOLS_OPENAI_KEY', label: 'OpenAI voice (Whisper/TTS)',  secret: true  },
+      { key: 'HONCHO_API_KEY',         label: 'Honcho (memory)',             secret: true  },
+    ],
+
+    get pendingCount() { return this.pending.length; },
+
+    async init() {
+      await Promise.all([this.loadConfig(), this.loadStatus(), this.loadLogs(), this.loadPairing()]);
+      setInterval(() => this.loadStatus(), 5000);
+      setInterval(() => this.loadLogs(),   3000);
+      setInterval(() => this.loadPairing(),5000);
+    },
+
+    async loadConfig() {
+      try {
+        const r = await fetch('/api/config');
+        if (r.ok) { const d = await r.json(); this.vars = d.vars||{}; }
+      } catch {}
+    },
+
+    async saveConfig() {
+      this.saving = true;
+      try {
+        const r = await fetch('/api/config', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ vars: { ...this.vars }, _restart: this.restartOnSave }),
+        });
+        if (r.ok) { this.notify('Saved', true); await this.loadConfig(); }
+        else { const e = await r.json().catch(()=>{}); this.notify(e?.error||'Save failed', false); }
+      } catch(e) { this.notify('Save failed: '+e.message, false); }
+      this.saving = false;
+    },
+
+    async loadStatus() {
+      try {
+        const r = await fetch('/api/status');
+        if (r.ok) { const d = await r.json(); this.status = d; this.gw = d.gateway||{}; }
+      } catch {}
+    },
+
+    async loadLogs() {
+      try {
+        const r = await fetch('/api/logs');
+        if (r.ok) {
+          const d = await r.json();
+          const box = this.$refs.logbox;
+          const atBottom = box && (box.scrollTop + box.clientHeight >= box.scrollHeight - 40);
+          this.logs = d.lines||[];
+          if (atBottom && box) this.$nextTick(() => { box.scrollTop = box.scrollHeight; });
+        }
+      } catch {}
+    },
+
+    async loadPairing() {
+      try {
+        const [pr, ar] = await Promise.all([fetch('/api/pairing/pending'), fetch('/api/pairing/approved')]);
+        if (pr.ok) this.pending  = (await pr.json()).pending||[];
+        if (ar.ok) this.approved = (await ar.json()).approved||[];
+      } catch {}
+    },
+
+    async startGw()       { await fetch('/api/gateway/start',   {method:'POST'}); this.notify('Starting…', true); setTimeout(()=>this.loadStatus(),1000); },
+    async stopGw()        { await fetch('/api/gateway/stop',    {method:'POST'}); this.notify('Stopping…', true); setTimeout(()=>this.loadStatus(),1000); },
+    async restartGateway(){ await fetch('/api/gateway/restart', {method:'POST'}); this.notify('Restarting…', true); setTimeout(()=>this.loadStatus(),2000); },
+
+    async approve(platform, code) {
+      const r = await fetch('/api/pairing/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({platform,code}) });
+      if (r.ok) { this.notify('User approved', true); await this.loadPairing(); }
+      else { const e = await r.json().catch(()=>{}); this.notify(e?.error||'Failed', false); }
+    },
+    async deny(platform, code) {
+      await fetch('/api/pairing/deny', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({platform,code}) });
+      this.notify('Denied', true); await this.loadPairing();
+    },
+    async revoke(platform, user_id) {
+      if (!confirm('Revoke access for this user?')) return;
+      await fetch('/api/pairing/revoke', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({platform,user_id}) });
+      this.notify('Revoked', true); await this.loadPairing();
+    },
+
+    fmtDate(ts) {
+      if (!ts) return '—';
+      return new Date(ts*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    },
+    fmtUptime(s) {
+      if (s==null) return '';
+      const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=s%60;
+      return h>0?`${h}h ${m}m ${sec}s`:m>0?`${m}m ${sec}s`:`${sec}s`;
+    },
+    notify(msg, ok) {
+      this.toast = { show: true, msg, ok };
+      setTimeout(() => { this.toast.show = false; }, 3000);
+    },
+  };
+}
+</script>
+</body>
+</html>
