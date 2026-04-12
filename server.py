@@ -355,10 +355,20 @@ async def api_config_put(request: Request):
         new_vars = body.get("vars", {})
         async with cfg_lock:
             existing = read_env(ENV_FILE)
+            # Only preserve variables that are NOT managed by our UI (system/other vars)
+            # but allow the UI to explicitly clear or overwrite managed ones.
+            managed_keys = {k for k, _, _, _ in ENV_VARS}
+            
             merged = unmask(new_vars, existing)
             for k, v in existing.items():
-                if k not in merged:
+                if k not in merged and k not in managed_keys:
                     merged[k] = v
+            
+            # Ensure keys explicitly cleared in UI are removed from final merged dict
+            for k in managed_keys:
+                if k in new_vars and not new_vars[k]:
+                    if k in merged: del merged[k]
+
             write_env(ENV_FILE, merged)
             write_config_yaml(merged)
         if restart:
