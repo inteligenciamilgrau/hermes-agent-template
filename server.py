@@ -25,7 +25,6 @@ from starlette.authentication import (
     SimpleUser,
 )
 from starlette.middleware import Middleware
-from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Route
@@ -196,16 +195,20 @@ def unmask(new: dict[str, str], existing: dict[str, str]) -> dict[str, str]:
     }
 
 
-# ── Auth (Session Based) ──────────────────────────────────────────────────────
+# ── Auth (Custom Session Manager) ─────────────────────────────────────────────
+SESSIONS: dict[str, str] = {} # token -> username
+
 def guard(request: Request):
-    if not request.session.get("authenticated"):
+    token = request.cookies.get("session_id")
+    if not token or token not in SESSIONS:
         if request.url.path.startswith("/api/"):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         return RedirectResponse(url="/login", status_code=303)
 
 
 async def page_login(request: Request):
-    if request.session.get("authenticated"):
+    token = request.cookies.get("session_id")
+    if token and token in SESSIONS:
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(request, "login.html", {"error": ""})
 
@@ -216,17 +219,24 @@ async def api_login(request: Request):
         user = data.get("username")
         pw = data.get("password")
         if user == ADMIN_USERNAME and pw == ADMIN_PASSWORD:
-            request.session["authenticated"] = True
-            request.session["user"] = user
-            return RedirectResponse(url="/", status_code=303)
+            token = secrets.token_urlsafe(32)
+            SESSIONS[token] = user
+            resp = RedirectResponse(url="/", status_code=303)
+            # Cookie expires in 1 day
+            resp.set_cookie("session_id", token, httponly=True, max_age=86400, samesite="lax")
+            return resp
         return templates.TemplateResponse(request, "login.html", {"error": "Invalid username or password"})
     except Exception:
         return RedirectResponse(url="/login", status_code=303)
 
 
 async def api_logout(request: Request):
-    request.session.clear()
-    return RedirectResponse(url="/login", status_code=303)
+    token = request.cookies.get("session_id")
+    if token in SESSIONS:
+        del SESSIONS[token]
+    resp = RedirectResponse(url="/login", status_code=303)
+    resp.delete_cookie("session_id")
+    return resp
 
 
 # ── Gateway manager ───────────────────────────────────────────────────────────
@@ -313,7 +323,9 @@ cfg_lock = asyncio.Lock()
 # ── Route handlers ────────────────────────────────────────────────────────────
 async def page_index(request: Request):
     if err := guard(request): return err
-    return templates.TemplateResponse(request, "index.html", {"user": request.session.get("user")})
+    token = request.cookies.get("session_id")
+    user = SESSIONS.get(token) if token else None
+    return templates.TemplateResponse(request, "index.html", {"user": user})
 
 
 async def route_health(request: Request):
@@ -545,9 +557,7 @@ routes = [
 
 app = Starlette(
     routes=routes,
-    middleware=[
-        Middleware(SessionMiddleware, secret_key=os.environ.get("SESSION_SECRET", secrets.token_urlsafe(32)))
-    ],
+    middleware=[],
     lifespan=lifespan,
 )
 
