@@ -617,6 +617,7 @@
                 </div>
             </template>
             <button class="btn" style="width:100%;" @click="addCustomProvider()">+ Add custom endpoint</button>
+            <button class="btn danger" style="width:100%; margin-top: 6px; font-size:11px; opacity:0.7;" @click="resetProviders()">🗑 Clear all provider keys</button>
             <p class="hint">Compatible with OpenAI chatcompletions format. When checked as "Active", it automatically maps to your model.</p>
           </div>
 
@@ -1152,6 +1153,21 @@ function app() {
         this.activeCustom = '';
         this.page = 'setup';
         this.notify('Config reset', true);
+      } else {
+        this.notify('Reset failed', false);
+      }
+    },
+
+    async resetProviders() {
+      if (!confirm('This will DELETE all provider API keys and model config from the .env file. Channel tokens (Telegram, etc.) are kept. Continue?')) return;
+      const r = await fetch('/api/config/reset-providers', { method: 'POST' });
+      if (r.ok) {
+        await this.loadConfig();
+        this.selectedProvider = '';
+        this.customProviders = [];
+        this.activeCustom = '';
+        this.page = 'setup';
+        this.notify('Provider keys cleared!', true);
       } else {
         this.notify('Reset failed', false);
       }

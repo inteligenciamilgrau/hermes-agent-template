@@ -394,20 +394,36 @@ async def api_config_put(request: Request):
         new_vars = body.get("vars", {})
         async with cfg_lock:
             existing = read_env(ENV_FILE)
-            # Only preserve variables that are NOT managed by our UI (system/other vars)
-            # but allow the UI to explicitly clear or overwrite managed ones.
-            managed_keys = {k for k, _, _, _ in ENV_VARS}
-            
-            merged = unmask(new_vars, existing)
+
+            # Keys that are safe to keep from existing (not provider-related)
+            SAFE_CATEGORIES = {"telegram", "discord", "slack", "whatsapp",
+                               "email", "mattermost", "matrix", "gateway", "admin"}
+            safe_keys = {k for k, _, c, _ in ENV_VARS if c in SAFE_CATEGORIES}
+
+            # Provider/dynamic keys suffixes - these must NEVER be preserved from old state
+            PROVIDER_SUFFIXES = ('_API_KEY', '_API_BASE', '_BASE_URL', '_SECRET')
+            PROVIDER_PREFIXES = ('OPENROUTER', 'OPENAI', 'DEEPSEEK', 'DASHSCOPE',
+                                 'GLM', 'KIMI', 'MINIMAX', 'HF_TOKEN', 'ANTHROPIC',
+                                 'GEMINI', 'COHERE', 'MISTRAL', 'GROQ', 'TOGETHER',
+                                 'ACTIVE_CUSTOM_PROVIDER')
+
+            def is_provider_key(k: str) -> bool:
+                return (any(k.startswith(p) for p in PROVIDER_PREFIXES) or
+                        (any(k.endswith(s) for s in PROVIDER_SUFFIXES) and k not in safe_keys))
+
+            # Start fresh: only keep safe non-provider keys from existing
+            merged: dict[str, str] = {}
             for k, v in existing.items():
-                is_dynamic_prov = any(k.endswith(suf) for suf in ('_API_KEY', '_TOKEN', '_BASE', '_URL')) and k not in managed_keys
-                if k not in merged and k not in managed_keys and not is_dynamic_prov:
+                if k in safe_keys and v:
                     merged[k] = v
-            
-            # Ensure keys explicitly cleared in UI are removed from final merged dict
-            for k in managed_keys:
-                if k in new_vars and not new_vars[k]:
-                    if k in merged: del merged[k]
+                elif not is_provider_key(k) and k not in {kk for kk, _, _, _ in ENV_VARS} and v:
+                    merged[k] = v  # unknown keys (custom user vars)
+
+            # Apply new_vars on top (unmask secrets)
+            applied = unmask(new_vars, existing)
+            for k, v in applied.items():
+                if v:  # only write non-empty
+                    merged[k] = v
 
             write_env(ENV_FILE, merged)
             write_config_yaml(merged)
@@ -416,6 +432,20 @@ async def api_config_put(request: Request):
         return JSONResponse({"ok": True, "restarting": restart})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def api_reset_providers(request: Request):
+    """Nuke all provider and custom api keys from .env, keeping only channels/tools."""
+    if err := guard(request): return err
+    async with cfg_lock:
+        existing = read_env(ENV_FILE)
+        SAFE_CATEGORIES = {"telegram", "discord", "slack", "whatsapp",
+                           "email", "mattermost", "matrix", "gateway", "admin", "tool"}
+        safe_keys = {k for k, _, c, _ in ENV_VARS if c in SAFE_CATEGORIES}
+        cleaned = {k: v for k, v in existing.items() if k in safe_keys and v}
+        write_env(ENV_FILE, cleaned)
+        write_config_yaml(cleaned)
+    return JSONResponse({"ok": True, "removed": len(existing) - len(cleaned)})
 
 
 async def api_status(request: Request):
@@ -599,6 +629,7 @@ routes = [
     Route("/api/gateway/stop",          api_gw_stop,         methods=["POST"]),
     Route("/api/gateway/restart",       api_gw_restart,      methods=["POST"]),
     Route("/api/config/reset",          api_config_reset,    methods=["POST"]),
+    Route("/api/config/reset-providers", api_reset_providers, methods=["POST"]),
     Route("/api/pairing/pending",       api_pairing_pending),
     Route("/api/pairing/approve",       api_pairing_approve, methods=["POST"]),
     Route("/api/pairing/deny",          api_pairing_deny,    methods=["POST"]),
