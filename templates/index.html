@@ -1000,6 +1000,9 @@ function app() {
     },
 
     updateCustomList() {
+       if (!this.activeCustom && this.customProviders.length > 0) {
+           this.activeCustom = this.customProviders[0].prefix;
+       }
        // Clear old custom keys
        for (const key of this._lastCustomKeys || []) {
            delete this.vars[key];

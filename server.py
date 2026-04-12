@@ -261,6 +261,14 @@ class Gateway:
             env = {**os.environ, "HERMES_HOME": HERMES_HOME}
             # Load all variables from our .env file
             saved_vars = read_env(ENV_FILE)
+            
+            # Prevent Docker static env vars from overriding deleted UI settings:
+            # If a managed key is NOT in saved_vars, forcibly remove it from subprocess env
+            managed_keys = {k for k, _, _, _ in ENV_VARS}
+            for k in managed_keys:
+                if k not in saved_vars and k in env:
+                    del env[k]
+                    
             env.update(saved_vars)
             
             model = env.get("LLM_MODEL", "")
@@ -361,7 +369,8 @@ async def api_config_put(request: Request):
             
             merged = unmask(new_vars, existing)
             for k, v in existing.items():
-                if k not in merged and k not in managed_keys:
+                is_dynamic_prov = any(k.endswith(suf) for suf in ('_API_KEY', '_TOKEN', '_BASE', '_URL')) and k not in managed_keys
+                if k not in merged and k not in managed_keys and not is_dynamic_prov:
                     merged[k] = v
             
             # Ensure keys explicitly cleared in UI are removed from final merged dict
