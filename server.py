@@ -123,13 +123,11 @@ def write_config_yaml(data: dict[str, str]) -> None:
     """Write a minimal config.yaml so hermes picks up the model and provider."""
     model = data.get("LLM_MODEL", "")
 
-    # For Custom Providers, Litellm expects custom_openai/ prefix to properly
-    # route to OPENAI_BASE_URL and strip the prefix from the final JSON payload.
+    # For Custom Providers, use standard openai/ prefix.
+    # Hermes explicitly extracts OPENAI_API_KEY when this prefix is used.
     if data.get("ACTIVE_CUSTOM_PROVIDER"):
-        if model.startswith("openai/"):
-            model = model.replace("openai/", "custom_openai/", 1)
-        elif not model.startswith("custom_openai/") and "/" not in model:
-            model = f"custom_openai/{model}"
+        if not model.startswith("openai/") and "/" not in model:
+            model = f"openai/{model}"
 
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -298,7 +296,7 @@ class Gateway:
                     env["OPENAI_BASE_URL"] = base_url
                 if api_key:
                     env["OPENAI_API_KEY"] = api_key
-                # Use auto provider, Litellm will route based on the custom_openai/ prefix in config.yaml
+                # Use auto provider, Litellm will route based on the openai/ prefix
                 env["HERMES_INFERENCE_PROVIDER"] = "auto"
                 print(f"[gateway] custom active={active} | base={base_url} | key={'set' if api_key else 'MISSING'}", flush=True)
             
@@ -438,8 +436,8 @@ async def api_config_put(request: Request):
                 # To override the in-memory load correctly, we should prefix it
                 # directly here if it's not already
                 mod = merged.get("LLM_MODEL", "")
-                if mod and not mod.startswith("custom_openai/") and "/" not in mod:
-                    merged["HERMES_MODEL"] = f"custom_openai/{mod}"
+                if mod and not mod.startswith("openai/") and "/" not in mod:
+                    merged["HERMES_MODEL"] = f"openai/{mod}"
                 else:
                     merged["HERMES_MODEL"] = mod
 
