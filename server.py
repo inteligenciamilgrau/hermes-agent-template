@@ -122,6 +122,16 @@ def read_env(path: Path) -> dict[str, str]:
 def write_config_yaml(data: dict[str, str]) -> None:
     """Write a minimal config.yaml so hermes picks up the model and provider."""
     model = data.get("LLM_MODEL", "")
+    
+    # If it's a custom provider, Litellm expects custom_openai/ prefix to properly 
+    # route to OPENAI_API_BASE and strip the prefix from the final payload.
+    if data.get("ACTIVE_CUSTOM_PROVIDER"):
+        # Strip confusing 'openai/' prefixes the user might have added
+        if model.startswith("openai/"):
+            model = model.replace("openai/", "custom_openai/", 1)
+        elif not model.startswith("custom_openai/") and "/" not in model:
+            model = f"custom_openai/{model}"
+
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(f"""\

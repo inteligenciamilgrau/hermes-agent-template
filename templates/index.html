@@ -623,8 +623,8 @@
           <div class="field-gap" x-show="selectedProvider">
             <label class="field-label">LLM Model</label>
             <input type="text" :value="vars.LLM_MODEL||''" @input="vars.LLM_MODEL=$event.target.value"
-                   placeholder="e.g. openai/gpt-4o-mini  or  deepseek/deepseek-chat">
-            <p class="hint">For custom providers, use <code>openai/your-model-name</code> format.</p>
+                   placeholder="e.g. gpt-4o-mini, deepseek-chat, or omnibob">
+            <p class="hint">Type the exact model name. Custom models are automatically formatted.</p>
           </div>
         </div>
 
