@@ -588,13 +588,31 @@
           </div>
 
           <div class="field-gap" x-show="selectedProvider === 'Custom'">
-            <label class="field-label">Custom Providers Environment Variables</label>
-            <textarea
-                style="background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: 13px; font-family: var(--font-mono); width: 100%; outline: none; transition: border-color 0.15s; resize: vertical; min-height: 80px;"
-                x-model="customProvidersText"
-                @input="updateCustomProviders()"
-                placeholder="ANY_PROVIDER_API_KEY=sk-...\nANOTHER_BASE_URL=https://..."></textarea>
-            <p class="hint">One per line. Key must end with _API_KEY, _TOKEN, _BASE, or _URL.</p>
+            <label class="field-label">Custom Providers (OpenAI-Compatible)</label>
+            <template x-for="(cp, i) in customProviders" :key="i">
+                <div style="background: var(--surface2); border: 1px solid var(--border); padding: 12px; border-radius: 6px; margin-bottom: 8px;">
+                    <div style="display:flex; justify-content:space-between; align-items: center; margin-bottom: 12px;">
+                        <div style="font-size:12px; font-weight:600; color:var(--text); font-family: var(--font-mono);">Endpoint <span x-text="i+1"></span></div>
+                        <button class="btn danger sm" @click="removeCustomProvider(i)">Remove</button>
+                    </div>
+                    <div class="field-grid-2">
+                        <div>
+                            <label class="field-label">Identifier (e.g. OPENAI)</label>
+                            <input type="text" x-model="cp.prefix" @input="updateCustomList()" placeholder="OPENAI">
+                        </div>
+                        <div>
+                            <label class="field-label">API Key / Token (Password)</label>
+                            <input type="password" x-model="cp.key" @input="updateCustomList()" placeholder="sk-...">
+                        </div>
+                    </div>
+                    <div class="field-gap">
+                        <label class="field-label">Endpoint URL (Base URL)</label>
+                        <input type="text" x-model="cp.url" @input="updateCustomList()" placeholder="https://api.openai.com/v1">
+                    </div>
+                </div>
+            </template>
+            <button class="btn" style="width:100%;" @click="addCustomProvider()">+ Add custom endpoint</button>
+            <p class="hint">Compatible with OpenAI chatcompletions format. Uses <code>PREFIX_API_BASE</code> and <code>PREFIX_API_KEY</code>.</p>
           </div>
 
           <div class="field-gap" x-show="selectedProvider">
@@ -934,7 +952,8 @@ function app() {
     },
 
     selectedProvider: '',
-    customProvidersText: '',
+    customProviders: [],
+    _lastCustomKeys: [],
 
     channelsEnabled: {
       telegram: false, discord: false, slack: false,
@@ -946,8 +965,10 @@ function app() {
     get pendingCount() { return this.pending.length; },
 
     get isSetupDone() {
-      const keys = Object.values(this.providerMap).map(p => p.key);
-      return !!(this.vars.LLM_MODEL && keys.some(k => this.vars[k]));
+      const keys = Object.values(this.providerMap).filter(p => p.key !== '_CUSTOM').map(p => p.key);
+      const hasBuiltin = keys.some(k => this.vars[k]);
+      const hasCustom = this.customProviders && this.customProviders.some(cp => cp.prefix && (cp.url || cp.key));
+      return !!(this.vars.LLM_MODEL && (hasBuiltin || hasCustom));
     },
 
     onProviderChange() {
@@ -956,24 +977,43 @@ function app() {
         if (name !== this.selectedProvider && p.key !== '_CUSTOM') this.vars[p.key] = '';
       }
       if (this.selectedProvider !== 'Custom') {
-         this.customProvidersText = '';
-         this.updateCustomProviders();
+         this.customProviders = [];
+         this.updateCustomList();
+      } else if (this.customProviders.length === 0) {
+         this.addCustomProvider();
       }
     },
 
-    updateCustomProviders() {
-       // Clear old custom keys
-       for (const key of Object.keys(this.vars)) {
-          if (key !== 'LLM_MODEL' && !this.tools.find(t => t.key === key) && !Object.values(this.providerMap).find(p => p.key === key) &&!['TELEGRAM_BOT_TOKEN','TELEGRAM_ALLOWED_USERS','DISCORD_BOT_TOKEN','DISCORD_ALLOWED_USERS','SLACK_BOT_TOKEN','SLACK_APP_TOKEN','EMAIL_ADDRESS','EMAIL_PASSWORD','EMAIL_IMAP_HOST','EMAIL_SMTP_HOST','MATTERMOST_URL','MATTERMOST_TOKEN','MATRIX_HOMESERVER','MATRIX_ACCESS_TOKEN','MATRIX_USER_ID','WHATSAPP_ENABLED','GATEWAY_ALLOW_ALL_USERS'].includes(key)){
-              delete this.vars[key]
-          }
-       }
+    addCustomProvider() {
+        this.customProviders.push({ prefix: '', url: '', key: '' });
+    },
+    
+    removeCustomProvider(i) {
+        this.customProviders.splice(i, 1);
+        this.updateCustomList();
+    },
 
-       const lines = this.customProvidersText.split('\n');
-       for (const line of lines) {
-           const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
-           if (match) {
-               this.vars[match[1]] = match[2];
+    updateCustomList() {
+       // Clear old custom keys
+       for (const key of this._lastCustomKeys || []) {
+           delete this.vars[key];
+       }
+       this._lastCustomKeys = [];
+
+       for (const cp of this.customProviders) {
+           let pfx = (cp.prefix || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '');
+           if (!pfx) continue;
+           pfx = pfx.replace(/_API$/, ''); // Clean trailing
+           
+           if (cp.url) {
+               const kBase = pfx + '_API_BASE';
+               this.vars[kBase] = cp.url.trim();
+               this._lastCustomKeys.push(kBase);
+           }
+           if (cp.key) {
+               const kKey = pfx + '_API_KEY';
+               this.vars[kKey] = cp.key.trim();
+               this._lastCustomKeys.push(kKey);
            }
        }
     },
@@ -1025,7 +1065,18 @@ function app() {
               
               if (customKeys.length > 0) {
                   this.selectedProvider = 'Custom';
-                  this.customProvidersText = customKeys.map(k => `${k}=${this.vars[k]}`).join('\n');
+                  const groups = {};
+                  for (const k of customKeys) {
+                      let pfx = k.replace(/_API_KEY$|_TOKEN$|_API_BASE$|_BASE$|_URL$/g, '');
+                      if (!groups[pfx]) groups[pfx] = { prefix: pfx, key: '', url: '' };
+                      if (k.endsWith('_API_KEY') || k.endsWith('_TOKEN')) groups[pfx].key = this.vars[k];
+                      else if (k.endsWith('_BASE') || k.endsWith('_URL')) groups[pfx].url = this.vars[k];
+                  }
+                  this.customProviders = Object.values(groups);
+                  this._lastCustomKeys = customKeys;
+              } else {
+                  this.customProviders = [];
+                  this._lastCustomKeys = [];
               }
           }
           // Detect active channels
@@ -1066,7 +1117,7 @@ function app() {
       if (r.ok) {
         await this.loadConfig();
         this.selectedProvider = '';
-        this.customProvidersText = '';
+        this.customProviders = [];
         this.page = 'setup';
         this.notify('Config reset', true);
       } else {
