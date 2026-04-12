@@ -1001,33 +1001,37 @@ function app() {
     },
 
     updateCustomList() {
-       if (!this.activeCustom && this.customProviders.length > 0) {
-           this.activeCustom = this.customProviders[0].prefix;
-       }
-       // Clear old custom keys
+       const normalize = s => (s || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '').replace(/_API$/, '');
+
+       // Clear old custom keys first
        for (const key of this._lastCustomKeys || []) {
            delete this.vars[key];
        }
        this._lastCustomKeys = [];
 
+       // Compute all valid normalized prefixes
+       const validPfxs = this.customProviders.map(cp => normalize(cp.prefix)).filter(p => p.length > 0);
+
+       // If activeCustom doesn't match any current provider, reset to first
+       if (!validPfxs.includes(normalize(this.activeCustom)) && validPfxs.length > 0) {
+           this.activeCustom = this.customProviders[0].prefix;
+       }
+
        for (const cp of this.customProviders) {
-           let pfx = (cp.prefix || '').trim().toUpperCase().replace(/[^A-Z0-9_]/g, '');
+           const pfx = normalize(cp.prefix);
            if (!pfx) continue;
-           pfx = pfx.replace(/_API$/, ''); // Clean trailing
-           
+
            if (cp.url) {
-               const kBase = pfx + '_API_BASE';
-               this.vars[kBase] = cp.url.trim();
-               this._lastCustomKeys.push(kBase);
+               this.vars[pfx + '_API_BASE'] = cp.url.trim();
+               this._lastCustomKeys.push(pfx + '_API_BASE');
            }
            if (cp.key) {
-               const kKey = pfx + '_API_KEY';
-               this.vars[kKey] = cp.key.trim();
-               this._lastCustomKeys.push(kKey);
+               this.vars[pfx + '_API_KEY'] = cp.key.trim();
+               this._lastCustomKeys.push(pfx + '_API_KEY');
            }
-           
-           // If this is the active custom provider, override OPENAI variables for direct compatibility
-           if (this.activeCustom === pfx) {
+
+           // Map active provider to OPENAI_* vars (normalized comparison)
+           if (pfx === normalize(this.activeCustom)) {
                if (cp.url) {
                    this.vars['OPENAI_BASE_URL'] = cp.url.trim();
                    this._lastCustomKeys.push('OPENAI_BASE_URL');
@@ -1040,7 +1044,8 @@ function app() {
                this._lastCustomKeys.push('ACTIVE_CUSTOM_PROVIDER');
            }
        }
-       if (!this.activeCustom) {
+
+       if (!validPfxs.includes(normalize(this.activeCustom))) {
            delete this.vars['OPENAI_BASE_URL'];
            delete this.vars['OPENAI_API_KEY'];
            delete this.vars['ACTIVE_CUSTOM_PROVIDER'];
@@ -1130,6 +1135,8 @@ function app() {
     },
 
     async saveConfig() {
+      // Ensure custom provider vars are in sync before saving
+      if (this.selectedProvider === 'Custom') this.updateCustomList();
       this.saving = true;
       try {
         const r = await fetch('/api/config', {
