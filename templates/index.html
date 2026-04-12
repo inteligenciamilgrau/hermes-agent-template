@@ -1030,24 +1030,16 @@ function app() {
                this._lastCustomKeys.push(pfx + '_API_KEY');
            }
 
-           // Map active provider to OPENAI_* vars (normalized comparison)
+           // Note: We don't map OPENAI_BASE_URL and OPENAI_API_KEY here anymore.
+           // Doing it in JS copies the "masked" (***) value and causes a bug in backend unmasking.
+           // Python backend will map it safely upon save.
            if (pfx === normalize(this.activeCustom)) {
-               if (cp.url) {
-                   this.vars['OPENAI_BASE_URL'] = cp.url.trim();
-                   this._lastCustomKeys.push('OPENAI_BASE_URL');
-               }
-               if (cp.key) {
-                   this.vars['OPENAI_API_KEY'] = cp.key.trim();
-                   this._lastCustomKeys.push('OPENAI_API_KEY');
-               }
                this.vars['ACTIVE_CUSTOM_PROVIDER'] = pfx;
                this._lastCustomKeys.push('ACTIVE_CUSTOM_PROVIDER');
            }
        }
 
        if (!validPfxs.includes(normalize(this.activeCustom))) {
-           delete this.vars['OPENAI_BASE_URL'];
-           delete this.vars['OPENAI_API_KEY'];
            delete this.vars['ACTIVE_CUSTOM_PROVIDER'];
        }
     },

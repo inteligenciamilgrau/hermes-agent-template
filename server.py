@@ -429,8 +429,16 @@ async def api_config_put(request: Request):
                     merged[k] = v
 
             write_env(ENV_FILE, merged)
-            # Persist inference provider directive so Hermes dotenv load doesn't override it
+            # Persist inference provider directive and model so Hermes dotsenv load doesn't override it
             if merged.get("ACTIVE_CUSTOM_PROVIDER"):
+                pfx = merged["ACTIVE_CUSTOM_PROVIDER"].upper()
+                
+                # IMPORTANT: Map the custom keys directly here in Python to avoid JS masking bugs!
+                if merged.get(f"{pfx}_API_BASE"):
+                    merged["OPENAI_BASE_URL"] = merged[f"{pfx}_API_BASE"]
+                if merged.get(f"{pfx}_API_KEY"):
+                    merged["OPENAI_API_KEY"] = merged[f"{pfx}_API_KEY"]
+
                 merged["HERMES_INFERENCE_PROVIDER"] = "auto"
                 
                 # To override the in-memory load correctly, we should prefix it
