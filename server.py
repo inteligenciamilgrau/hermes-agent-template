@@ -265,21 +265,37 @@ class Gateway:
             return
         self.state = "starting"
         try:
-            # .env values take priority over Railway env vars.
-            # We build the env this way so hermes's own dotenv loading
-            # (which reads the same file) doesn't shadow our values.
-            env = {**os.environ, "HERMES_HOME": HERMES_HOME}
-            # Load all variables from our .env file
+            # Build a clean environment for the subprocess.
+            # Strategy: start from os.environ but STRIP all known provider API keys completely.
+            # Then re-inject ONLY what is in our .env file.
+            # This prevents Docker/Railway static env vars from "haunting" old providers.
+            PROVIDER_STRIP_SUFFIXES = ('_API_KEY', '_TOKEN', '_API_BASE', '_BASE_URL', '_SECRET')
+            PROVIDER_STRIP_PREFIXES = ('OPENROUTER', 'OPENAI', 'DEEPSEEK', 'DASHSCOPE',
+                                       'GLM', 'KIMI', 'MINIMAX', 'HF_TOKEN', 'ANTHROPIC',
+                                       'GEMINI', 'COHERE', 'MISTRAL', 'GROQ', 'TOGETHER',
+                                       'ACTIVE_CUSTOM_PROVIDER')
+            env = {}
+            for k, v in os.environ.items():
+                skip = (any(k.startswith(p) for p in PROVIDER_STRIP_PREFIXES) or
+                        any(k.endswith(s) for s in PROVIDER_STRIP_SUFFIXES))
+                if not skip:
+                    env[k] = v
+
+            env["HERMES_HOME"] = HERMES_HOME
+
+            # Load saved .env and inject everything — this is the single source of truth
             saved_vars = read_env(ENV_FILE)
-            
-            # Prevent Docker static env vars from overriding deleted UI settings:
-            # If a managed key is NOT in saved_vars, forcibly remove it from subprocess env
-            managed_keys = {k for k, _, _, _ in ENV_VARS}
-            for k in managed_keys:
-                if k not in saved_vars and k in env:
-                    del env[k]
-                    
             env.update(saved_vars)
+            
+            # If custom provider is active, ensure OPENAI_API_KEY / OPENAI_API_BASE 
+            # are set so LiteLLM routes correctly via custom_openai/
+            active = saved_vars.get("ACTIVE_CUSTOM_PROVIDER", "")
+            if active:
+                pfx = active.upper()
+                if f"{pfx}_API_BASE" in saved_vars and "OPENAI_API_BASE" not in saved_vars:
+                    env["OPENAI_API_BASE"] = saved_vars[f"{pfx}_API_BASE"]
+                if f"{pfx}_API_KEY" in saved_vars and "OPENAI_API_KEY" not in saved_vars:
+                    env["OPENAI_API_KEY"] = saved_vars[f"{pfx}_API_KEY"]
             
             model = env.get("LLM_MODEL", "")
             # Log what we found (masked)
