@@ -122,15 +122,17 @@ def read_env(path: Path) -> dict[str, str]:
 def write_config_yaml(data: dict[str, str]) -> None:
     """Write a minimal config.yaml so hermes picks up the model and provider."""
     model = data.get("LLM_MODEL", "")
-    
-    # If it's a custom provider, Litellm expects custom_openai/ prefix to properly 
-    # route to OPENAI_API_BASE and strip the prefix from the final payload.
+
+    # For custom providers with HERMES_INFERENCE_PROVIDER=openai, the model name
+    # must be bare (e.g. "omnibob") — NOT prefixed with "openai/" or "custom_openai/".
+    # Hermes reads OPENAI_BASE_URL and OPENAI_API_KEY directly from env, so
+    # the model just needs to match what the remote endpoint expects.
     if data.get("ACTIVE_CUSTOM_PROVIDER"):
-        # Strip confusing 'openai/' prefixes the user might have added
-        if model.startswith("openai/"):
-            model = model.replace("openai/", "custom_openai/", 1)
-        elif not model.startswith("custom_openai/") and "/" not in model:
-            model = f"custom_openai/{model}"
+        # Strip any litellm-style prefix the user may have typed
+        for prefix in ("custom_openai/", "openai/"):
+            if model.startswith(prefix):
+                model = model[len(prefix):]
+                break
 
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,15 +289,21 @@ class Gateway:
             saved_vars = read_env(ENV_FILE)
             env.update(saved_vars)
             
-            # If custom provider is active, ensure OPENAI_API_KEY / OPENAI_API_BASE 
-            # are set so LiteLLM routes correctly via custom_openai/
+            # If custom provider is active, map to OPENAI_BASE_URL (not OPENAI_API_BASE!)
+            # The Hermes docs say the correct var is OPENAI_BASE_URL
+            # Also set HERMES_INFERENCE_PROVIDER=openai to bypass auto-detection
             active = saved_vars.get("ACTIVE_CUSTOM_PROVIDER", "")
             if active:
                 pfx = active.upper()
-                if f"{pfx}_API_BASE" in saved_vars and "OPENAI_API_BASE" not in saved_vars:
-                    env["OPENAI_API_BASE"] = saved_vars[f"{pfx}_API_BASE"]
-                if f"{pfx}_API_KEY" in saved_vars and "OPENAI_API_KEY" not in saved_vars:
-                    env["OPENAI_API_KEY"] = saved_vars[f"{pfx}_API_KEY"]
+                base_url = saved_vars.get("OPENAI_BASE_URL") or saved_vars.get(f"{pfx}_API_BASE", "")
+                api_key  = saved_vars.get("OPENAI_API_KEY") or saved_vars.get(f"{pfx}_API_KEY", "")
+                if base_url:
+                    env["OPENAI_BASE_URL"] = base_url
+                if api_key:
+                    env["OPENAI_API_KEY"] = api_key
+                # Force Hermes to use OpenAI provider pipeline
+                env["HERMES_INFERENCE_PROVIDER"] = "openai"
+                print(f"[gateway] custom active={active} | base={base_url} | key={'set' if api_key else 'MISSING'}", flush=True)
             
             model = env.get("LLM_MODEL", "")
             # Debug: print all provider-relevant env vars being passed to subprocess

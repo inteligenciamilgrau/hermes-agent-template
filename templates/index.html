@@ -1029,8 +1029,8 @@ function app() {
            // If this is the active custom provider, override OPENAI variables for direct compatibility
            if (this.activeCustom === pfx) {
                if (cp.url) {
-                   this.vars['OPENAI_API_BASE'] = cp.url.trim();
-                   this._lastCustomKeys.push('OPENAI_API_BASE');
+                   this.vars['OPENAI_BASE_URL'] = cp.url.trim();
+                   this._lastCustomKeys.push('OPENAI_BASE_URL');
                }
                if (cp.key) {
                    this.vars['OPENAI_API_KEY'] = cp.key.trim();
@@ -1041,7 +1041,7 @@ function app() {
            }
        }
        if (!this.activeCustom) {
-           delete this.vars['OPENAI_API_BASE'];
+           delete this.vars['OPENAI_BASE_URL'];
            delete this.vars['OPENAI_API_KEY'];
            delete this.vars['ACTIVE_CUSTOM_PROVIDER'];
        }
