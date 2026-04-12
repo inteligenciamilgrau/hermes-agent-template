@@ -434,6 +434,12 @@ async def api_config_put(request: Request):
                     merged[k] = v
 
             write_env(ENV_FILE, merged)
+            # Persist inference provider directive so Hermes dotenv load doesn't override it
+            if merged.get("ACTIVE_CUSTOM_PROVIDER"):
+                merged["HERMES_INFERENCE_PROVIDER"] = "openai"
+                if merged.get("LLM_MODEL"):
+                    merged["HERMES_MODEL"] = merged["LLM_MODEL"]
+                write_env(ENV_FILE, merged)
             write_config_yaml(merged)
         if restart:
             asyncio.create_task(gw.restart())
@@ -465,12 +471,12 @@ async def api_status(request: Request):
         for k in PROVIDER_KEYS
     }
     
-    # Custom providers
+    # Custom providers: only show _API_KEY / _TOKEN entries (not _BASE/_URL which are not credentials)
     known_tool_keys = {k for k, _, c, _ in ENV_VARS if c != "provider"}
     for k, v in data.items():
         if k not in PROVIDER_KEYS and k not in known_tool_keys and k != "LLM_MODEL":
-            if k.endswith("_API_KEY") or k.endswith("_TOKEN") or k.endswith("_BASE") or k.endswith("_URL"):
-                name = k.replace("_API_KEY","").replace("_TOKEN","").replace("_BASE","").replace("_URL","").replace("_"," ").title()
+            if k.endswith("_API_KEY") or k.endswith("_TOKEN"):
+                name = k.replace("_API_KEY","").replace("_TOKEN","").replace("_"," ").title()
                 providers[name] = {"configured": bool(v)}
     channels = {
         name: {"configured": bool(v := data.get(key,"")) and v.lower() not in ("false","0","no")}
