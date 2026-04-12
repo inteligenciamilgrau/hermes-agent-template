@@ -123,16 +123,13 @@ def write_config_yaml(data: dict[str, str]) -> None:
     """Write a minimal config.yaml so hermes picks up the model and provider."""
     model = data.get("LLM_MODEL", "")
 
-    # For custom providers with HERMES_INFERENCE_PROVIDER=openai, the model name
-    # must be bare (e.g. "omnibob") — NOT prefixed with "openai/" or "custom_openai/".
-    # Hermes reads OPENAI_BASE_URL and OPENAI_API_KEY directly from env, so
-    # the model just needs to match what the remote endpoint expects.
+    # For Custom Providers, Litellm expects custom_openai/ prefix to properly
+    # route to OPENAI_BASE_URL and strip the prefix from the final JSON payload.
     if data.get("ACTIVE_CUSTOM_PROVIDER"):
-        # Strip any litellm-style prefix the user may have typed
-        for prefix in ("custom_openai/", "openai/"):
-            if model.startswith(prefix):
-                model = model[len(prefix):]
-                break
+        if model.startswith("openai/"):
+            model = model.replace("openai/", "custom_openai/", 1)
+        elif not model.startswith("custom_openai/") and "/" not in model:
+            model = f"custom_openai/{model}"
 
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,8 +298,8 @@ class Gateway:
                     env["OPENAI_BASE_URL"] = base_url
                 if api_key:
                     env["OPENAI_API_KEY"] = api_key
-                # Force Hermes to use OpenAI provider pipeline
-                env["HERMES_INFERENCE_PROVIDER"] = "openai"
+                # Use auto provider, Litellm will route based on the custom_openai/ prefix in config.yaml
+                env["HERMES_INFERENCE_PROVIDER"] = "auto"
                 print(f"[gateway] custom active={active} | base={base_url} | key={'set' if api_key else 'MISSING'}", flush=True)
             
             model = env.get("LLM_MODEL", "")
@@ -436,9 +433,16 @@ async def api_config_put(request: Request):
             write_env(ENV_FILE, merged)
             # Persist inference provider directive so Hermes dotenv load doesn't override it
             if merged.get("ACTIVE_CUSTOM_PROVIDER"):
-                merged["HERMES_INFERENCE_PROVIDER"] = "openai"
-                if merged.get("LLM_MODEL"):
-                    merged["HERMES_MODEL"] = merged["LLM_MODEL"]
+                merged["HERMES_INFERENCE_PROVIDER"] = "auto"
+                
+                # To override the in-memory load correctly, we should prefix it
+                # directly here if it's not already
+                mod = merged.get("LLM_MODEL", "")
+                if mod and not mod.startswith("custom_openai/") and "/" not in mod:
+                    merged["HERMES_MODEL"] = f"custom_openai/{mod}"
+                else:
+                    merged["HERMES_MODEL"] = mod
+
                 write_env(ENV_FILE, merged)
             write_config_yaml(merged)
         if restart:
