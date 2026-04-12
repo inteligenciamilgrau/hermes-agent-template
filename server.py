@@ -125,6 +125,7 @@ def write_config_yaml(data: dict[str, str]) -> None:
     
     # Check if a custom provider is active
     base_url_yaml = ""
+    compression_yaml = ""
     if data.get("ACTIVE_CUSTOM_PROVIDER"):
         # Strip prefixes if the user types them, because we use base_url explicitly
         for pfx in ("openai/", "custom_openai/"):
@@ -137,13 +138,15 @@ def write_config_yaml(data: dict[str, str]) -> None:
         custom_url = data.get(f"{active_pfx}_API_BASE") or data.get("OPENAI_BASE_URL", "")
         if custom_url:
             base_url_yaml = f'\n  base_url: "{custom_url}"'
+            # Also tell Hermes to use this same endpoint for context compression to silence the warning
+            compression_yaml = f'\n\ncompression:\n  summary_model: "{model}"\n  summary_base_url: "{custom_url}"'
 
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(f"""\
 model:
   default: "{model}"
-  provider: "auto"{base_url_yaml}
+  provider: "auto"{base_url_yaml}{compression_yaml}
 
 terminal:
   backend: "local"
