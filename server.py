@@ -298,9 +298,14 @@ class Gateway:
                     env["OPENAI_API_KEY"] = saved_vars[f"{pfx}_API_KEY"]
             
             model = env.get("LLM_MODEL", "")
-            # Log what we found (masked)
+            # Debug: print all provider-relevant env vars being passed to subprocess
             print(f"[gateway] Starting with HERMES_HOME={HERMES_HOME}", flush=True)
-            print(f"[gateway] model={model or '⚠ NOT SET'}", flush=True)
+            print(f"[gateway] LLM_MODEL={model or '⚠ NOT SET'}", flush=True)
+            print(f"[gateway] OPENAI_API_BASE={env.get('OPENAI_API_BASE', '⚠ NOT SET')}", flush=True)
+            print(f"[gateway] OPENAI_API_KEY={'SET (' + env['OPENAI_API_KEY'][:8] + '...)' if env.get('OPENAI_API_KEY') else '⚠ NOT SET'}", flush=True)
+            print(f"[gateway] ACTIVE_CUSTOM_PROVIDER={env.get('ACTIVE_CUSTOM_PROVIDER', '⚠ NOT SET')}", flush=True)
+            print(f"[gateway] OPENROUTER_API_KEY={'SET' if env.get('OPENROUTER_API_KEY') else 'NOT SET (good)'}", flush=True)
+            print(f"[gateway] .env contents: {list(saved_vars.keys())}", flush=True)
             # Write config.yaml so hermes picks up the model (env vars alone aren't always enough)
             write_config_yaml(read_env(ENV_FILE))
             self.proc = await asyncio.create_subprocess_exec(
