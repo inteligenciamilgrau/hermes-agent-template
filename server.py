@@ -13,6 +13,7 @@ import re
 import secrets
 import signal
 import time
+import logging
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,7 +34,8 @@ from starlette.templating import Jinja2Templates
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
-HERMES_HOME = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
+# In Docker, we prefer a fixed /app/data path if possible, or fallback to ~/.hermes
+HERMES_HOME = os.environ.get("HERMES_HOME", "/app/data" if os.path.exists("/app") else str(Path.home() / ".hermes"))
 ENV_FILE = Path(HERMES_HOME) / ".env"
 PAIRING_DIR = Path(HERMES_HOME) / "pairing"
 PAIRING_TTL = 3600
@@ -257,12 +259,14 @@ class Gateway:
             # We build the env this way so hermes's own dotenv loading
             # (which reads the same file) doesn't shadow our values.
             env = {**os.environ, "HERMES_HOME": HERMES_HOME}
-            env.update(read_env(ENV_FILE))
+            # Load all variables from our .env file
+            saved_vars = read_env(ENV_FILE)
+            env.update(saved_vars)
+            
             model = env.get("LLM_MODEL", "")
-            provider_key = next((env.get(k, "") for k in PROVIDER_KEYS if env.get(k)), "")
-            if not provider_key:
-                provider_key = next((env.get(k, "") for k in env if is_secret_key(k) and env.get(k) and "TELEGRAM" not in k and "DISCORD" not in k and "SLACK" not in k), "")
-            print(f"[gateway] model={model or '⚠ NOT SET'} | provider_key={'set' if provider_key else '⚠ NOT SET'}", flush=True)
+            # Log what we found (masked)
+            print(f"[gateway] Starting with HERMES_HOME={HERMES_HOME}", flush=True)
+            print(f"[gateway] model={model or '⚠ NOT SET'}", flush=True)
             # Write config.yaml so hermes picks up the model (env vars alone aren't always enough)
             write_config_yaml(read_env(ENV_FILE))
             self.proc = await asyncio.create_subprocess_exec(
@@ -563,6 +567,12 @@ app = Starlette(
 
 if __name__ == "__main__":
     import uvicorn
+    
+    # Silence repetitive polling logs
+    logging.getLogger("uvicorn.access").addFilter(
+        lambda record: all(path not in record.getMessage() for path in ["/api/logs", "/api/status", "/api/pairing"])
+    )
+
     port = int(os.environ.get("PORT", "8080"))
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
