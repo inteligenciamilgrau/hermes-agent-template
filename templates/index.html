@@ -579,12 +579,22 @@
             </select>
           </div>
 
-          <div class="field-gap" x-show="selectedProvider">
+          <div class="field-gap" x-show="selectedProvider && selectedProvider !== 'Custom'">
             <label class="field-label">API Key</label>
             <input type="password"
                    :value="selectedProvider ? (vars[providerMap[selectedProvider]?.key]||'') : ''"
                    @input="if(selectedProvider) vars[providerMap[selectedProvider].key]=$event.target.value"
                    :placeholder="selectedProvider ? (providerMap[selectedProvider]?.placeholder||'Paste your API key') : ''">
+          </div>
+
+          <div class="field-gap" x-show="selectedProvider === 'Custom'">
+            <label class="field-label">Custom Providers Environment Variables</label>
+            <textarea
+                style="background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: 13px; font-family: var(--font-mono); width: 100%; outline: none; transition: border-color 0.15s; resize: vertical; min-height: 80px;"
+                x-model="customProvidersText"
+                @input="updateCustomProviders()"
+                placeholder="ANY_PROVIDER_API_KEY=sk-...\nANOTHER_BASE_URL=https://..."></textarea>
+            <p class="hint">One per line. Key must end with _API_KEY, _TOKEN, _BASE, or _URL.</p>
           </div>
 
           <div class="field-gap" x-show="selectedProvider">
@@ -920,9 +930,11 @@ function app() {
       'Kimi':        { key: 'KIMI_API_KEY',          placeholder: ''          },
       'MiniMax':     { key: 'MINIMAX_API_KEY',       placeholder: ''          },
       'HuggingFace': { key: 'HF_TOKEN',              placeholder: 'hf_...'   },
+      'Custom':      { key: '_CUSTOM',               placeholder: ''          },
     },
 
     selectedProvider: '',
+    customProvidersText: '',
 
     channelsEnabled: {
       telegram: false, discord: false, slack: false,
@@ -941,8 +953,29 @@ function app() {
     onProviderChange() {
       // Clear keys from other providers when switching
       for (const [name, p] of Object.entries(this.providerMap)) {
-        if (name !== this.selectedProvider) this.vars[p.key] = '';
+        if (name !== this.selectedProvider && p.key !== '_CUSTOM') this.vars[p.key] = '';
       }
+      if (this.selectedProvider !== 'Custom') {
+         this.customProvidersText = '';
+         this.updateCustomProviders();
+      }
+    },
+
+    updateCustomProviders() {
+       // Clear old custom keys
+       for (const key of Object.keys(this.vars)) {
+          if (key !== 'LLM_MODEL' && !this.tools.find(t => t.key === key) && !Object.values(this.providerMap).find(p => p.key === key) &&!['TELEGRAM_BOT_TOKEN','TELEGRAM_ALLOWED_USERS','DISCORD_BOT_TOKEN','DISCORD_ALLOWED_USERS','SLACK_BOT_TOKEN','SLACK_APP_TOKEN','EMAIL_ADDRESS','EMAIL_PASSWORD','EMAIL_IMAP_HOST','EMAIL_SMTP_HOST','MATTERMOST_URL','MATTERMOST_TOKEN','MATRIX_HOMESERVER','MATRIX_ACCESS_TOKEN','MATRIX_USER_ID','WHATSAPP_ENABLED','GATEWAY_ALLOW_ALL_USERS'].includes(key)){
+              delete this.vars[key]
+          }
+       }
+
+       const lines = this.customProvidersText.split('\n');
+       for (const line of lines) {
+           const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+           if (match) {
+               this.vars[match[1]] = match[2];
+           }
+       }
     },
 
     clearChannel(ch) {
@@ -977,8 +1010,23 @@ function app() {
           const d = await r.json();
           this.vars = d.vars || {};
           // Detect active provider
+          let foundStandard = false;
           for (const [name, p] of Object.entries(this.providerMap)) {
-            if (this.vars[p.key]) { this.selectedProvider = name; break; }
+            if (p.key !== '_CUSTOM' && this.vars[p.key]) { this.selectedProvider = name; foundStandard = true; break; }
+          }
+          if (!foundStandard) {
+              const customKeys = Object.keys(this.vars).filter(key => 
+                  key !== 'LLM_MODEL' && 
+                  !this.tools.find(t => t.key === key) && 
+                  !Object.values(this.providerMap).find(p => p.key === key) &&
+                  !['TELEGRAM_BOT_TOKEN','TELEGRAM_ALLOWED_USERS','DISCORD_BOT_TOKEN','DISCORD_ALLOWED_USERS','SLACK_BOT_TOKEN','SLACK_APP_TOKEN','EMAIL_ADDRESS','EMAIL_PASSWORD','EMAIL_IMAP_HOST','EMAIL_SMTP_HOST','MATTERMOST_URL','MATTERMOST_TOKEN','MATRIX_HOMESERVER','MATRIX_ACCESS_TOKEN','MATRIX_USER_ID','WHATSAPP_ENABLED','GATEWAY_ALLOW_ALL_USERS'].includes(key) &&
+                  (key.endsWith('_API_KEY') || key.endsWith('_TOKEN') || key.endsWith('_BASE') || key.endsWith('_URL'))
+              );
+              
+              if (customKeys.length > 0) {
+                  this.selectedProvider = 'Custom';
+                  this.customProvidersText = customKeys.map(k => `${k}=${this.vars[k]}`).join('\n');
+              }
           }
           // Detect active channels
           this.channelsEnabled = {
@@ -1018,6 +1066,7 @@ function app() {
       if (r.ok) {
         await this.loadConfig();
         this.selectedProvider = '';
+        this.customProvidersText = '';
         this.page = 'setup';
         this.notify('Config reset', true);
       } else {

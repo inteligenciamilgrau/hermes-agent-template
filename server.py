@@ -176,16 +176,22 @@ def write_env(path: Path, data: dict[str, str]) -> None:
     path.write_text("\n".join(lines))
 
 
+def is_secret_key(k: str) -> bool:
+    if k in SECRET_KEYS:
+        return True
+    k_upper = k.upper()
+    return any(x in k_upper for x in ("_KEY", "_TOKEN", "SECRET", "PASSWORD"))
+
 def mask(data: dict[str, str]) -> dict[str, str]:
     return {
-        k: (v[:8] + "***" if len(v) > 8 else "***") if k in SECRET_KEYS and v else v
+        k: (v[:8] + "***" if len(v) > 8 else "***") if is_secret_key(k) and v else v
         for k, v in data.items()
     }
 
 
 def unmask(new: dict[str, str], existing: dict[str, str]) -> dict[str, str]:
     return {
-        k: (existing.get(k, "") if k in SECRET_KEYS and v.endswith("***") else v)
+        k: (existing.get(k, "") if is_secret_key(k) and v.endswith("***") else v)
         for k, v in new.items()
     }
 
@@ -236,6 +242,8 @@ class Gateway:
             env.update(read_env(ENV_FILE))
             model = env.get("LLM_MODEL", "")
             provider_key = next((env.get(k, "") for k in PROVIDER_KEYS if env.get(k)), "")
+            if not provider_key:
+                provider_key = next((env.get(k, "") for k in env if is_secret_key(k) and env.get(k) and "TELEGRAM" not in k and "DISCORD" not in k and "SLACK" not in k), "")
             print(f"[gateway] model={model or '⚠ NOT SET'} | provider_key={'set' if provider_key else '⚠ NOT SET'}", flush=True)
             # Write config.yaml so hermes picks up the model (env vars alone aren't always enough)
             write_config_yaml(read_env(ENV_FILE))
@@ -344,6 +352,14 @@ async def api_status(request: Request):
         {"configured": bool(data.get(k))}
         for k in PROVIDER_KEYS
     }
+    
+    # Custom providers
+    known_tool_keys = {k for k, _, c, _ in ENV_VARS if c != "provider"}
+    for k, v in data.items():
+        if k not in PROVIDER_KEYS and k not in known_tool_keys and k != "LLM_MODEL":
+            if k.endswith("_API_KEY") or k.endswith("_TOKEN") or k.endswith("_BASE") or k.endswith("_URL"):
+                name = k.replace("_API_KEY","").replace("_TOKEN","").replace("_BASE","").replace("_URL","").replace("_"," ").title()
+                providers[name] = {"configured": bool(v)}
     channels = {
         name: {"configured": bool(v := data.get(key,"")) and v.lower() not in ("false","0","no")}
         for name, key in CHANNEL_MAP.items()
@@ -477,7 +493,15 @@ async def api_pairing_revoke(request: Request):
 # ── App lifecycle ─────────────────────────────────────────────────────────────
 async def auto_start():
     data = read_env(ENV_FILE)
-    if any(data.get(k) for k in PROVIDER_KEYS):
+    
+    has_provider = any(data.get(k) for k in PROVIDER_KEYS)
+    if not has_provider:
+        for k, v in data.items():
+            if is_secret_key(k) and v and "TELEGRAM" not in k and "DISCORD" not in k and "SLACK" not in k and "MATTERMOST" not in k and "MATRIX" not in k:
+                has_provider = True
+                break
+
+    if has_provider or data.get("LLM_MODEL"):
         asyncio.create_task(gw.start())
     else:
         print("[server] No provider key found — gateway not started. Configure one in the admin UI.", flush=True)
