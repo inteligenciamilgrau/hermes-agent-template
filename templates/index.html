@@ -590,15 +590,20 @@
           <div class="field-gap" x-show="selectedProvider === 'Custom'">
             <label class="field-label">Custom Providers (OpenAI-Compatible)</label>
             <template x-for="(cp, i) in customProviders" :key="i">
-                <div style="background: var(--surface2); border: 1px solid var(--border); padding: 12px; border-radius: 6px; margin-bottom: 8px;">
+                <div style="background: var(--surface2); border: 1px solid var(--border); padding: 12px; border-radius: 6px; margin-bottom: 8px;"
+                     :style="activeCustom === cp.prefix && cp.prefix ? 'border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);' : ''">
                     <div style="display:flex; justify-content:space-between; align-items: center; margin-bottom: 12px;">
-                        <div style="font-size:12px; font-weight:600; color:var(--text); font-family: var(--font-mono);">Endpoint <span x-text="i+1"></span></div>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <input type="radio" :name="'active_custom'" :value="cp.prefix" x-model="activeCustom" @change="updateCustomList()" :id="'radio_'+i" 
+                                   style="width: 16px; height: 16px; accent-color: var(--accent); cursor:pointer;">
+                            <label :for="'radio_'+i" style="font-size:12px; font-weight:600; color:var(--text); cursor:pointer;">Set as Active (Endpoint <span x-text="i+1"></span>)</label>
+                        </div>
                         <button class="btn danger sm" @click="removeCustomProvider(i)">Remove</button>
                     </div>
                     <div class="field-grid-2">
                         <div>
-                            <label class="field-label">Identifier (e.g. OPENAI)</label>
-                            <input type="text" x-model="cp.prefix" @input="updateCustomList()" placeholder="OPENAI">
+                            <label class="field-label">Identifier (e.g. LOCAL)</label>
+                            <input type="text" x-model="cp.prefix" @input="updateCustomList()" placeholder="LOCAL">
                         </div>
                         <div>
                             <label class="field-label">API Key / Token (Password)</label>
@@ -612,14 +617,14 @@
                 </div>
             </template>
             <button class="btn" style="width:100%;" @click="addCustomProvider()">+ Add custom endpoint</button>
-            <p class="hint">Compatible with OpenAI chatcompletions format. Uses <code>PREFIX_API_BASE</code> and <code>PREFIX_API_KEY</code>.</p>
+            <p class="hint">Compatible with OpenAI chatcompletions format. When checked as "Active", it automatically maps to your model.</p>
           </div>
 
           <div class="field-gap" x-show="selectedProvider">
             <label class="field-label">LLM Model</label>
             <input type="text" :value="vars.LLM_MODEL||''" @input="vars.LLM_MODEL=$event.target.value"
                    placeholder="e.g. openai/gpt-4o-mini  or  deepseek/deepseek-chat">
-            <p class="hint">OpenRouter format: <code>provider/model-name</code></p>
+            <p class="hint">For custom providers, use <code>openai/your-model-name</code> format.</p>
           </div>
         </div>
 
@@ -953,6 +958,7 @@ function app() {
 
     selectedProvider: '',
     customProviders: [],
+    activeCustom: '',
     _lastCustomKeys: [],
 
     channelsEnabled: {
@@ -1015,6 +1021,25 @@ function app() {
                this.vars[kKey] = cp.key.trim();
                this._lastCustomKeys.push(kKey);
            }
+           
+           // If this is the active custom provider, override OPENAI variables for direct compatibility
+           if (this.activeCustom === pfx) {
+               if (cp.url) {
+                   this.vars['OPENAI_API_BASE'] = cp.url.trim();
+                   this._lastCustomKeys.push('OPENAI_API_BASE');
+               }
+               if (cp.key) {
+                   this.vars['OPENAI_API_KEY'] = cp.key.trim();
+                   this._lastCustomKeys.push('OPENAI_API_KEY');
+               }
+               this.vars['ACTIVE_CUSTOM_PROVIDER'] = pfx;
+               this._lastCustomKeys.push('ACTIVE_CUSTOM_PROVIDER');
+           }
+       }
+       if (!this.activeCustom) {
+           delete this.vars['OPENAI_API_BASE'];
+           delete this.vars['OPENAI_API_KEY'];
+           delete this.vars['ACTIVE_CUSTOM_PROVIDER'];
        }
     },
 
@@ -1067,15 +1092,18 @@ function app() {
                   this.selectedProvider = 'Custom';
                   const groups = {};
                   for (const k of customKeys) {
+                      if (k === 'ACTIVE_CUSTOM_PROVIDER' || k === 'OPENAI_API_BASE' || k === 'OPENAI_API_KEY') continue;
                       let pfx = k.replace(/_API_KEY$|_TOKEN$|_API_BASE$|_BASE$|_URL$/g, '');
                       if (!groups[pfx]) groups[pfx] = { prefix: pfx, key: '', url: '' };
                       if (k.endsWith('_API_KEY') || k.endsWith('_TOKEN')) groups[pfx].key = this.vars[k];
                       else if (k.endsWith('_BASE') || k.endsWith('_URL')) groups[pfx].url = this.vars[k];
                   }
                   this.customProviders = Object.values(groups);
+                  this.activeCustom = this.vars['ACTIVE_CUSTOM_PROVIDER'] || '';
                   this._lastCustomKeys = customKeys;
               } else {
                   this.customProviders = [];
+                  this.activeCustom = '';
                   this._lastCustomKeys = [];
               }
           }
@@ -1118,6 +1146,7 @@ function app() {
         await this.loadConfig();
         this.selectedProvider = '';
         this.customProviders = [];
+        this.activeCustom = '';
         this.page = 'setup';
         this.notify('Config reset', true);
       } else {
