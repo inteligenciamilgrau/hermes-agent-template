@@ -497,6 +497,7 @@ async def api_status(request: Request):
     known_tool_keys = {k for k, _, c, _ in ENV_VARS if c != "provider"}
     for k, v in data.items():
         if k not in PROVIDER_KEYS and k not in known_tool_keys and k != "LLM_MODEL":
+            if k == "OPENAI_API_KEY": continue
             if k.endswith("_API_KEY") or k.endswith("_TOKEN"):
                 name = k.replace("_API_KEY","").replace("_TOKEN","").replace("_"," ").title()
                 providers[name] = {"configured": bool(v)}
