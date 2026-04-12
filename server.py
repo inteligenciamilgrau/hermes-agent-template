@@ -122,19 +122,28 @@ def read_env(path: Path) -> dict[str, str]:
 def write_config_yaml(data: dict[str, str]) -> None:
     """Write a minimal config.yaml so hermes picks up the model and provider."""
     model = data.get("LLM_MODEL", "")
-
-    # For Custom Providers, use standard openai/ prefix.
-    # Hermes explicitly routes this to the local OPENAI_BASE_URL via LiteLLM
+    
+    # Check if a custom provider is active
+    base_url_yaml = ""
     if data.get("ACTIVE_CUSTOM_PROVIDER"):
-        if not model.startswith("openai/") and "/" not in model:
-            model = f"openai/{model}"
+        # Strip prefixes if the user types them, because we use base_url explicitly
+        for pfx in ("openai/", "custom_openai/"):
+            if model.startswith(pfx):
+                model = model[len(pfx):]
+                break
+        
+        # Grab the provider's custom URL if available
+        active_pfx = data["ACTIVE_CUSTOM_PROVIDER"].upper()
+        custom_url = data.get(f"{active_pfx}_API_BASE") or data.get("OPENAI_BASE_URL", "")
+        if custom_url:
+            base_url_yaml = f'\n  base_url: "{custom_url}"'
 
     config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(f"""\
 model:
   default: "{model}"
-  provider: "auto"
+  provider: "auto"{base_url_yaml}
 
 terminal:
   backend: "local"
@@ -296,7 +305,7 @@ class Gateway:
                     env["OPENAI_BASE_URL"] = base_url
                 if api_key:
                     env["OPENAI_API_KEY"] = api_key
-                # Use auto provider, Litellm will route based on the openai/ prefix
+                # Use auto provider, config.yaml explicitly handles base_url
                 env["HERMES_INFERENCE_PROVIDER"] = "auto"
                 print(f"[gateway] custom active={active} | base={base_url} | key={'set' if api_key else 'MISSING'}", flush=True)
             
@@ -441,12 +450,13 @@ async def api_config_put(request: Request):
 
                 merged["HERMES_INFERENCE_PROVIDER"] = "auto"
                 
-                # To override the in-memory load correctly, use openai/ prefix
+                # To override the in-memory load correctly
                 mod = merged.get("LLM_MODEL", "")
-                if mod and not mod.startswith("openai/") and "/" not in mod:
-                    merged["HERMES_MODEL"] = f"openai/{mod}"
-                else:
-                    merged["HERMES_MODEL"] = mod
+                for prefix in ("openai/", "custom_openai/"):
+                    if mod.startswith(prefix):
+                        mod = mod[len(prefix):]
+                        break
+                merged["HERMES_MODEL"] = mod
 
                 write_env(ENV_FILE, merged)
             write_config_yaml(merged)
