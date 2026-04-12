@@ -1093,7 +1093,7 @@ function app() {
                   this.selectedProvider = 'Custom';
                   const groups = {};
                   for (const k of customKeys) {
-                      if (k === 'ACTIVE_CUSTOM_PROVIDER' || k === 'OPENAI_API_BASE' || k === 'OPENAI_API_KEY') continue;
+                      if (k === 'ACTIVE_CUSTOM_PROVIDER' || k === 'OPENAI_API_BASE' || k === 'OPENAI_API_KEY' || k === 'OPENAI_BASE_URL') continue;
                       let pfx = k.replace(/_API_KEY$|_TOKEN$|_API_BASE$|_BASE$|_URL$/g, '');
                       if (!groups[pfx]) groups[pfx] = { prefix: pfx, key: '', url: '' };
                       if (k.endsWith('_API_KEY') || k.endsWith('_TOKEN')) groups[pfx].key = this.vars[k];
