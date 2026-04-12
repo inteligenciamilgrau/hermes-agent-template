@@ -25,9 +25,9 @@ from starlette.authentication import (
     SimpleUser,
 )
 from starlette.middleware import Middleware
-from starlette.middleware.authentication import AuthenticationMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Route
 from starlette.templating import Jinja2Templates
 
@@ -196,29 +196,37 @@ def unmask(new: dict[str, str], existing: dict[str, str]) -> dict[str, str]:
     }
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-class BasicAuth(AuthenticationBackend):
-    async def authenticate(self, conn):
-        if "Authorization" not in conn.headers:
-            return None
-        try:
-            scheme, creds = conn.headers["Authorization"].split()
-            if scheme.lower() != "basic":
-                return None
-            user, _, pw = base64.b64decode(creds).decode().partition(":")
-        except Exception:
-            raise AuthenticationError("Invalid credentials")
-        if user == ADMIN_USERNAME and pw == ADMIN_PASSWORD:
-            return AuthCredentials(["authenticated"]), SimpleUser(user)
-        raise AuthenticationError("Invalid credentials")
-
-
+# ── Auth (Session Based) ──────────────────────────────────────────────────────
 def guard(request: Request):
-    if not request.user.is_authenticated:
-        return PlainTextResponse(
-            "Unauthorized", status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="hermes-admin"'},
-        )
+    if not request.session.get("authenticated"):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return RedirectResponse(url="/login", status_code=303)
+
+
+async def page_login(request: Request):
+    if request.session.get("authenticated"):
+        return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse(request, "login.html", {"error": ""})
+
+
+async def api_login(request: Request):
+    try:
+        data = await request.form()
+        user = data.get("username")
+        pw = data.get("password")
+        if user == ADMIN_USERNAME and pw == ADMIN_PASSWORD:
+            request.session["authenticated"] = True
+            request.session["user"] = user
+            return RedirectResponse(url="/", status_code=303)
+        return templates.TemplateResponse(request, "login.html", {"error": "Invalid username or password"})
+    except Exception:
+        return RedirectResponse(url="/login", status_code=303)
+
+
+async def api_logout(request: Request):
+    request.session.clear()
+    return RedirectResponse(url="/login", status_code=303)
 
 
 # ── Gateway manager ───────────────────────────────────────────────────────────
@@ -305,7 +313,7 @@ cfg_lock = asyncio.Lock()
 # ── Route handlers ────────────────────────────────────────────────────────────
 async def page_index(request: Request):
     if err := guard(request): return err
-    return templates.TemplateResponse(request, "index.html")
+    return templates.TemplateResponse(request, "index.html", {"user": request.session.get("user")})
 
 
 async def route_health(request: Request):
@@ -530,11 +538,16 @@ routes = [
     Route("/api/pairing/deny",          api_pairing_deny,    methods=["POST"]),
     Route("/api/pairing/approved",      api_pairing_approved),
     Route("/api/pairing/revoke",        api_pairing_revoke,  methods=["POST"]),
+    Route("/login",                     page_login,          methods=["GET"]),
+    Route("/login",                     api_login,           methods=["POST"]),
+    Route("/logout",                    api_logout),
 ]
 
 app = Starlette(
     routes=routes,
-    middleware=[Middleware(AuthenticationMiddleware, backend=BasicAuth())],
+    middleware=[
+        Middleware(SessionMiddleware, secret_key=os.environ.get("SESSION_SECRET", secrets.token_urlsafe(32)))
+    ],
     lifespan=lifespan,
 )
 
