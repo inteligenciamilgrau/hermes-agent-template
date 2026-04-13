@@ -157,6 +157,84 @@ agent:
   max_iterations: 50
 
 data_dir: "{HERMES_HOME}"
+
+skills:
+  disabled:
+    - web-browsing
+    - terminal-interpreter
+    - dogfood
+    - claude-code
+    - codex
+    - opencode
+    - ascii-art
+    - ascii-video
+    - excalidraw
+    - ideation
+    - manim-video
+    - p5js
+    - popular-web-designs
+    - songwriting-and-ai-music
+    - jupyter-live-kernel
+    - webhook-subscriptions
+    - himalaya
+    - minecraft-modpack-server
+    - pokemon-player
+    - codebase-inspection
+    - github-auth
+    - github-code-review
+    - github-issues
+    - github-pr-workflow
+    - github-repo-management
+    - find-nearby
+    - mcporter
+    - native-mcp
+    - gif-search
+    - heartmula
+    - songsee
+    - youtube-content
+    - audiocraft-audio-generation
+    - axolotl
+    - clip
+    - dspy
+    - evaluating-llms-harness
+    - fine-tuning-with-trl
+    - gguf-quantization
+    - grpo-rl-training
+    - guidance
+    - huggingface-hub
+    - llama-cpp
+    - modal-serverless-gpu
+    - obliteratus
+    - outlines
+    - peft-fine-tuning
+    - pytorch-fsdp
+    - segment-anything-model
+    - serving-llms-vllm
+    - stable-diffusion-image-generation
+    - unsloth
+    - weights-and-biases
+    - whisper
+    - obsidian
+    - google-workspace
+    - linear
+    - nano-pdf
+    - notion
+    - ocr-and-documents
+    - powerpoint
+    - godmode
+    - arxiv
+    - blogwatcher
+    - llm-wiki
+    - polymarket
+    - research-paper-writing
+    - openhue
+    - xitter
+    - plan
+    - requesting-code-review
+    - subagent-driven-development
+    - systematic-debugging
+    - test-driven-development
+    - writing-plans
 """)
 
 
