@@ -55,6 +55,8 @@ ENV_VARS = [
     ("LLM_MODEL",               "Model",                    "model",     False),
     ("OPENROUTER_API_KEY",       "OpenRouter",               "provider",  True),
     ("DEEPSEEK_API_KEY",         "DeepSeek",                 "provider",  True),
+    ("GOOGLE_API_KEY",           "Google (Gemini)",          "provider",  True),
+    ("ANTHROPIC_API_KEY",        "Anthropic (Claude)",       "provider",  True),
     ("DASHSCOPE_API_KEY",        "DashScope",                "provider",  True),
     ("GLM_API_KEY",              "GLM / Z.AI",               "provider",  True),
     ("KIMI_API_KEY",             "Kimi",                     "provider",  True),
@@ -164,17 +166,17 @@ def write_config_yaml(data: dict[str, str], overwrite: bool = False) -> None:
     elif "base_url" in yaml_data["model"]:
         del yaml_data["model"]["base_url"]
 
-    if summary_base_url:
+    if model:
         if "compression" not in yaml_data:
             yaml_data["compression"] = {}
         yaml_data["compression"]["summary_model"] = model
-        yaml_data["compression"]["summary_base_url"] = summary_base_url
+        if summary_base_url:
+            yaml_data["compression"]["summary_base_url"] = summary_base_url
+        elif "summary_base_url" in yaml_data["compression"]:
+            del yaml_data["compression"]["summary_base_url"]
     else:
-        if "compression" in yaml_data and "summary_base_url" in yaml_data["compression"]:
-             del yaml_data["compression"]["summary_base_url"]
-             del yaml_data["compression"]["summary_model"]
-             if not yaml_data["compression"]:
-                 del yaml_data["compression"]
+        if "compression" in yaml_data:
+            del yaml_data["compression"]
                  
     if "terminal" not in yaml_data:
         yaml_data["terminal"] = {"backend": "local", "timeout": 60, "cwd": "/tmp"}
