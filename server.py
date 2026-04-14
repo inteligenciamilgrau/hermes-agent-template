@@ -119,8 +119,11 @@ def read_env(path: Path) -> dict[str, str]:
     return out
 
 
-def write_config_yaml(data: dict[str, str]) -> None:
+def write_config_yaml(data: dict[str, str], overwrite: bool = False) -> None:
     """Write a minimal config.yaml so hermes picks up the model and provider."""
+    config_path = Path(HERMES_HOME) / "config.yaml"
+    if config_path.exists() and not overwrite:
+        return
     model = data.get("LLM_MODEL", "")
     
     # Check if a custom provider is active
@@ -141,7 +144,6 @@ def write_config_yaml(data: dict[str, str]) -> None:
             # Also tell Hermes to use this same endpoint for context compression to silence the warning
             compression_yaml = f'\n\ncompression:\n  summary_model: "{model}"\n  summary_base_url: "{custom_url}"'
 
-    config_path = Path(HERMES_HOME) / "config.yaml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(f"""\
 model:
@@ -615,7 +617,7 @@ async def api_config_reset(request: Request):
     async with cfg_lock:
         if ENV_FILE.exists():
             ENV_FILE.unlink()
-        write_config_yaml({})
+        write_config_yaml({}, overwrite=True)
     return JSONResponse({"ok": True})
 
 
