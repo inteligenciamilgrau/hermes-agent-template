@@ -14,6 +14,7 @@ import secrets
 import signal
 import time
 import logging
+import yaml
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -120,124 +121,95 @@ def read_env(path: Path) -> dict[str, str]:
 
 
 def write_config_yaml(data: dict[str, str], overwrite: bool = False) -> None:
-    """Write a minimal config.yaml so hermes picks up the model and provider."""
+    """Sync the active model info into config.yaml, preserving manual edits if the file exists."""
     config_path = Path(HERMES_HOME) / "config.yaml"
-    if config_path.exists() and not overwrite:
-        return
-    model = data.get("LLM_MODEL", "")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Check if a custom provider is active
-    base_url_yaml = ""
-    compression_yaml = ""
+    yaml_data = {}
+    if config_path.exists() and not overwrite:
+        try:
+            with config_path.open("r", encoding="utf-8") as f:
+                yaml_data = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"[gateway] Warning: Failed to parse existing config.yaml: {e}", flush=True)
+
+    model = data.get("LLM_MODEL", "")
+    base_url = ""
+    summary_base_url = ""
+    
     if data.get("ACTIVE_CUSTOM_PROVIDER"):
-        # Strip prefixes if the user types them, because we use base_url explicitly
         for pfx in ("openai/", "custom_openai/"):
             if model.startswith(pfx):
                 model = model[len(pfx):]
                 break
         
-        # Grab the provider's custom URL if available
         active_pfx = data["ACTIVE_CUSTOM_PROVIDER"].upper()
         custom_url = data.get(f"{active_pfx}_API_BASE") or data.get("OPENAI_BASE_URL", "")
         if custom_url:
-            base_url_yaml = f'\n  base_url: "{custom_url}"'
-            # Also tell Hermes to use this same endpoint for context compression to silence the warning
-            compression_yaml = f'\n\ncompression:\n  summary_model: "{model}"\n  summary_base_url: "{custom_url}"'
+            base_url = custom_url
+            summary_base_url = custom_url
 
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(f"""\
-model:
-  default: "{model}"
-  provider: "auto"{base_url_yaml}{compression_yaml}
+    if "model" not in yaml_data:
+        yaml_data["model"] = {}
+    
+    yaml_data["model"]["default"] = model
+    yaml_data["model"]["provider"] = "auto"
+    
+    if base_url:
+        yaml_data["model"]["base_url"] = base_url
+    elif "base_url" in yaml_data["model"]:
+        del yaml_data["model"]["base_url"]
 
-terminal:
-  backend: "local"
-  timeout: 60
-  cwd: "/tmp"
+    if summary_base_url:
+        if "compression" not in yaml_data:
+            yaml_data["compression"] = {}
+        yaml_data["compression"]["summary_model"] = model
+        yaml_data["compression"]["summary_base_url"] = summary_base_url
+    else:
+        if "compression" in yaml_data and "summary_base_url" in yaml_data["compression"]:
+             del yaml_data["compression"]["summary_base_url"]
+             del yaml_data["compression"]["summary_model"]
+             if not yaml_data["compression"]:
+                 del yaml_data["compression"]
+                 
+    if "terminal" not in yaml_data:
+        yaml_data["terminal"] = {"backend": "local", "timeout": 60, "cwd": "/tmp"}
+    if "agent" not in yaml_data:
+        yaml_data["agent"] = {"max_iterations": 50}
+    
+    if "data_dir" not in yaml_data or overwrite:
+        yaml_data["data_dir"] = str(HERMES_HOME)
 
-agent:
-  max_iterations: 50
+    # If it's a fresh file, inject our default disabled skills
+    if not config_path.exists() or overwrite or "skills" not in yaml_data:
+        yaml_data["skills"] = {
+            "disabled": [
+                "web-browsing", "terminal-interpreter", "dogfood", "claude-code",
+                "codex", "opencode", "ascii-art", "ascii-video", "excalidraw",
+                "ideation", "manim-video", "p5js", "popular-web-designs",
+                "songwriting-and-ai-music", "jupyter-live-kernel", "webhook-subscriptions",
+                "himalaya", "minecraft-modpack-server", "pokemon-player", "codebase-inspection",
+                "github-auth", "github-code-review", "github-issues", "github-pr-workflow",
+                "github-repo-management", "find-nearby", "mcporter", "native-mcp", "gif-search",
+                "heartmula", "songsee", "youtube-content", "audiocraft-audio-generation",
+                "axolotl", "clip", "dspy", "evaluating-llms-harness", "fine-tuning-with-trl",
+                "gguf-quantization", "grpo-rl-training", "guidance", "huggingface-hub",
+                "llama-cpp", "modal-serverless-gpu", "obliteratus", "outlines", "peft-fine-tuning",
+                "pytorch-fsdp", "segment-anything-model", "serving-llms-vllm",
+                "stable-diffusion-image-generation", "unsloth", "weights-and-biases",
+                "whisper", "obsidian", "google-workspace", "linear", "nano-pdf", "notion",
+                "ocr-and-documents", "powerpoint", "godmode", "arxiv", "blogwatcher", "llm-wiki",
+                "polymarket", "research-paper-writing", "openhue", "xitter", "plan",
+                "requesting-code-review", "subagent-driven-development", "systematic-debugging",
+                "test-driven-development", "writing-plans"
+            ]
+        }
 
-data_dir: "{HERMES_HOME}"
-
-skills:
-  disabled:
-    - web-browsing
-    - terminal-interpreter
-    - dogfood
-    - claude-code
-    - codex
-    - opencode
-    - ascii-art
-    - ascii-video
-    - excalidraw
-    - ideation
-    - manim-video
-    - p5js
-    - popular-web-designs
-    - songwriting-and-ai-music
-    - jupyter-live-kernel
-    - webhook-subscriptions
-    - himalaya
-    - minecraft-modpack-server
-    - pokemon-player
-    - codebase-inspection
-    - github-auth
-    - github-code-review
-    - github-issues
-    - github-pr-workflow
-    - github-repo-management
-    - find-nearby
-    - mcporter
-    - native-mcp
-    - gif-search
-    - heartmula
-    - songsee
-    - youtube-content
-    - audiocraft-audio-generation
-    - axolotl
-    - clip
-    - dspy
-    - evaluating-llms-harness
-    - fine-tuning-with-trl
-    - gguf-quantization
-    - grpo-rl-training
-    - guidance
-    - huggingface-hub
-    - llama-cpp
-    - modal-serverless-gpu
-    - obliteratus
-    - outlines
-    - peft-fine-tuning
-    - pytorch-fsdp
-    - segment-anything-model
-    - serving-llms-vllm
-    - stable-diffusion-image-generation
-    - unsloth
-    - weights-and-biases
-    - whisper
-    - obsidian
-    - google-workspace
-    - linear
-    - nano-pdf
-    - notion
-    - ocr-and-documents
-    - powerpoint
-    - godmode
-    - arxiv
-    - blogwatcher
-    - llm-wiki
-    - polymarket
-    - research-paper-writing
-    - openhue
-    - xitter
-    - plan
-    - requesting-code-review
-    - subagent-driven-development
-    - systematic-debugging
-    - test-driven-development
-    - writing-plans
-""")
+    try:
+        with config_path.open("w", encoding="utf-8") as f:
+            yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False)
+    except Exception as e:
+        print(f"[gateway] Failed to write config.yaml: {e}", flush=True)
 
 
 def write_env(path: Path, data: dict[str, str]) -> None:
