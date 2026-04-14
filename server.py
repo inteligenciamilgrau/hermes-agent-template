@@ -166,10 +166,16 @@ def write_config_yaml(data: dict[str, str], overwrite: bool = False) -> None:
     elif "base_url" in yaml_data["model"]:
         del yaml_data["model"]["base_url"]
 
+    active_provider = data.get("ACTIVE_CUSTOM_PROVIDER", "auto").lower()
+
     if model:
         if "compression" not in yaml_data:
             yaml_data["compression"] = {}
+        
+        yaml_data["compression"]["enabled"] = True
+        yaml_data["compression"]["summary_provider"] = active_provider
         yaml_data["compression"]["summary_model"] = model
+        
         if summary_base_url:
             yaml_data["compression"]["summary_base_url"] = summary_base_url
         elif "summary_base_url" in yaml_data["compression"]:
