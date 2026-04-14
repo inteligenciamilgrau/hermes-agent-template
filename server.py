@@ -128,10 +128,14 @@ def write_config_yaml(data: dict[str, str], overwrite: bool = False) -> None:
     yaml_data = {}
     if config_path.exists() and not overwrite:
         try:
+            # Create a backup before proceeding (overwrites any existing .bak)
+            backup_path = Path(HERMES_HOME) / "config.yaml.bak"
+            backup_path.write_bytes(config_path.read_bytes())
+            
             with config_path.open("r", encoding="utf-8") as f:
                 yaml_data = yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"[gateway] Warning: Failed to parse existing config.yaml: {e}", flush=True)
+            print(f"[gateway] Warning: Failed to parse existing config.yaml (or create backup): {e}", flush=True)
 
     model = data.get("LLM_MODEL", "")
     base_url = ""
